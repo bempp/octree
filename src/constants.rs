@@ -205,7 +205,7 @@ pub const X_LOOKUP_DECODE: [u64; 512] = [
 ];
 
 /// Number of bits used for Level information.
-pub const LEVEL_DISPLACEMENT: usize = 15;
+pub const LEVEL_DISPLACEMENT: u64 = 15;
 
 /// Mask for the last 15 bits.
 pub const LEVEL_MASK: u64 = 0x7FFF;
