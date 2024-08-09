@@ -1,0 +1,39 @@
+[features]
+# Treat warnings as a build error.
+strict = []
+
+[package]
+name = "bempp-octree"
+version = "0.0.1-dev"
+edition = "2021"
+authors = ["Srinath Kailasa <srinathkailasa@gmail.com>, Timo Betcke <timo.betcke@gmail.com>"]
+description = "A library to create Octrees"
+license = "BSD-3-Clause"
+homepage = "https://github.com/bempp/octree"
+repository = "https://github.com/bempp/octree"
+readme = "README.md"
+keywords = ["numerics"]
+categories = ["mathematics", "science"]
+
+[lib]
+name = "bempp_octree"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+itertools = "0.13.*"
+num = "0.4"
+approx = "0.5"
+rayon = "1.9"
+rand = "0.8.5"
+rand_distr = "0.4.3"
+bitflags = "2.6.0"
+coe-rs = "0.1.2"
+
+[dev-dependencies]
+criterion = { version = "0.5.*", features = ["html_reports"]}
+
+[build-dependencies]
+cbindgen = "0.26.0"
+
+[lints.clippy]
+wildcard_imports = "forbid"
