@@ -281,7 +281,7 @@ impl MortonKey {
         result
     }
 
-    pub fn complete_region<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
+    pub fn complete_region(keys: &[MortonKey]) -> Vec<MortonKey> {
         // First make sure that the input sequence is sorted.
         let mut keys = keys.to_vec();
         keys.sort_unstable();
@@ -604,5 +604,33 @@ mod test {
     }
 
     #[test]
-    pub fn test_complete_region() {}
+    pub fn test_complete_region() {
+        // Do various checks
+        fn sanity_checks(keys: &[MortonKey], complete_region: &[MortonKey]) {
+            // Check that keys are strictly sorted and that no key is ancestor of the next key.
+
+            let min_level = keys.iter().min().unwrap();
+
+            for (k1, k2) in keys.iter().tuple_windows() {
+                assert!(k1 < k2);
+                assert!(!key1.is_ancestor(key2));
+            }
+
+            // Check that level not higher than min_level
+
+            for k in keys.iter() {
+                assert!(k.level() <= min_level);
+            }
+        }
+
+        // Create 3 Morton keys around which to complete region.
+
+        let key1 = MortonKey::from_index_and_level([17, 30, 55], 10);
+        let key2 = MortonKey::from_index_and_level([17, 540, 55], 10);
+        let key3 = MortonKey::from_index_and_level([17, 30, 799], 11);
+
+        let keys = [key1, key2, key3];
+
+        let keys = MortonKey::complete_region(keys.as_slice());
+    }
 }
