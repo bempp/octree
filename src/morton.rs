@@ -1,12 +1,13 @@
 //! Routines for working with Morton indices.
 
 use crate::constants::*;
+use itertools::Itertools;
 
 // Creating a distinct type for Morton indices
 // to distinguish from i64
 // numbers.
 
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MortonKey {
     value: i64,
 }
@@ -120,7 +121,9 @@ impl MortonKey {
         let my_level = self.level();
         let other_level = other.level();
 
-        if my_level > other_level {
+        if *self == other {
+            true
+        } else if my_level > other_level {
             false
         } else {
             // We shift both keys out to 3 * DEEPEST_LEVEL - my_level
@@ -173,6 +176,148 @@ impl MortonKey {
             value: first_key | new_level as i64,
         }
     }
+
+    pub fn children(&self) -> [MortonKey; 8] {
+        let level = self.level() as i64;
+        assert!(level != DEEPEST_LEVEL);
+
+        let child_level = 1 + level;
+
+        let shift = 3 * (DEEPEST_LEVEL - child_level);
+        let key = self.value;
+        [
+            MortonKey::new(1 + (key | (0 << shift))),
+            MortonKey::new(1 + (key | (1 << shift))),
+            MortonKey::new(1 + (key | (2 << shift))),
+            MortonKey::new(1 + (key | (3 << shift))),
+            MortonKey::new(1 + (key | (4 << shift))),
+            MortonKey::new(1 + (key | (5 << shift))),
+            MortonKey::new(1 + (key | (6 << shift))),
+            MortonKey::new(1 + (key | (7 << shift))),
+        ]
+    }
+
+    pub fn remove_overlaps<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
+        let mut new_keys = Vec::<MortonKey>::new();
+        if keys.is_empty() {
+            new_keys
+        } else {
+            for (m1, m2) in keys.iter().tuple_windows() {
+                if m1 == m2 || m1.is_ancestor(*m2) {
+                    continue;
+                }
+                new_keys.push(*m1)
+            }
+            new_keys.push(*keys.last().unwrap());
+            new_keys
+        }
+    }
+
+    pub fn fill_between_keys(&self, key2: MortonKey) -> Vec<MortonKey> {
+        // Make sure that key1 is smaller or equal key2
+        let (key1, key2) = if *self < key2 {
+            (*self, key2)
+        } else {
+            (key2, *self)
+        };
+
+        // If key1 is ancestor of key2 return empty list. Note that
+        // is_ancestor is true if key1 is equal to key2.
+        if key1.is_ancestor(key2) {
+            return Vec::<MortonKey>::new();
+        }
+
+        // The finest common ancestor is always closer to the root than either key
+        // if key1 is not an ancestor of key2 or vice versa.
+        let ancestor = key1.finest_common_ancestor(key2);
+        let children = ancestor.children();
+
+        let mut result = Vec::<MortonKey>::new();
+
+        let mut work_set = Vec::<MortonKey>::from_iter(children.iter().copied());
+
+        while let Some(item) = work_set.pop() {
+            // If the item is either key we don't want it in the result.
+            if item == key1 || item == key2 {
+                continue;
+            }
+            // We want items that are strictly between the two keys and are not ancestors of either.
+            // We do not check specifically if item is an ancestor of key1 as then it would be smaller than key1.
+            else if key1 < item && item < key2 && !item.is_ancestor(key2) {
+                result.push(item);
+            } else {
+                // If the item is an ancestor of key1 or key2 just refine to the children and try again.
+                // Note we already exclude that item is identical to key1 or key2.
+                // So if item is an ancestor of either its children cannot have a level larger than key1 or key2.
+                if item.is_ancestor(key1) || item.is_ancestor(key2) {
+                    let children = item.children();
+                    work_set.extend(children.iter());
+                }
+            }
+        }
+
+        result.sort_unstable();
+        result
+    }
+
+    pub fn complete_region<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
+        // First make sure that the input sequence is sorted.
+        let mut keys = keys.to_vec();
+        keys.sort_unstable();
+
+        let mut result = Vec::<MortonKey>::new();
+
+        // Special case of empty keys.
+        if keys.len() == 0 {
+            result.push(MortonKey::from_index_and_level([0, 0, 0], 0));
+            return result;
+        }
+
+        // If a single element is given then just return the result if it is the root of the tree.
+        if keys.len() == 1 {
+            if result[0] == MortonKey::from_index_and_level([0, 0, 0], 0) {
+                return result;
+            }
+        }
+
+        let deepest_first = MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize);
+        let deepest_last = MortonKey::from_index_and_level(
+            [
+                LEVEL_SIZE as usize - 1,
+                LEVEL_SIZE as usize - 1,
+                LEVEL_SIZE as usize - 1,
+            ],
+            DEEPEST_LEVEL as usize,
+        );
+
+        // If the first key is not an ancestor of the deepest possible first element in the
+        // tree get the finest ancestor between the two and use the first child of that.
+
+        let first_key = *keys.first().unwrap();
+        let last_key = *keys.last().unwrap();
+
+        if !first_key.is_ancestor(deepest_first) {
+            let ancestor = deepest_first.finest_common_ancestor(first_key);
+            keys.insert(0, ancestor.children()[0]);
+        }
+
+        if !last_key.is_ancestor(deepest_last) {
+            let ancestor = deepest_last.finest_common_ancestor(last_key);
+            keys.push(ancestor.children()[NSIBLINGS - 1]);
+        }
+
+        // Now just iterate over the keys by tuples of two and fill the region between two keys.
+
+        for (&key1, &key2) in keys.iter().tuple_windows() {
+            result.push(key1);
+            result.extend_from_slice(key1.fill_between_keys(key2).as_slice());
+        }
+
+        // Push the final key
+        result.push(*keys.last().unwrap());
+        // We do not sort the keys. They are already sorted.
+        result
+    }
 }
 
 impl std::fmt::Display for MortonKey {
@@ -201,6 +346,8 @@ impl std::fmt::Debug for MortonKey {
 
 #[cfg(test)]
 mod test {
+    use std::hash::RandomState;
+
     use super::*;
 
     #[test]
@@ -366,10 +513,54 @@ mod test {
     }
 
     #[test]
+    fn test_children() {
+        let key = MortonKey::from_index_and_level([1, 3, 5], 3);
+        let children = key.children();
+
+        // Check that all the children are different.
+
+        let children_set =
+            std::collections::HashSet::<MortonKey>::from_iter(children.iter().copied());
+        assert_eq!(children_set.len(), 8);
+
+        // Check that all children are on the correct level and that their parent is our key.
+
+        for child in children {
+            assert_eq!(child.level(), 4);
+            assert_eq!(child.parent(), key);
+        }
+    }
+
+    #[test]
     fn test_print() {
         let key = MortonKey::from_index_and_level([1, 3, 5], 3);
         let parent = key.parent();
 
         println!("{}", parent);
+    }
+
+    #[test]
+    fn test_fill_between_keys() {
+        // Do various checks
+        fn sanity_checks(key1: MortonKey, key2: MortonKey, mut keys: Vec<MortonKey>) {
+            // Check that keys are strictly sorted and that no key is ancestor of the next key.
+
+            keys.insert(0, key1);
+            keys.push(key2);
+
+            for (k1, k2) in keys.iter().tuple_windows() {
+                assert!(k1 < k2);
+                assert!(!key1.is_ancestor(key2));
+            }
+        }
+
+        // Correct result for keys on one level
+        let key1 = MortonKey::from_index_and_level([0, 0, 0], 1);
+        let key2 = MortonKey::from_index_and_level([1, 1, 1], 1);
+
+        let keys = key1.fill_between_keys(key2);
+        assert!(!keys.is_empty());
+
+        sanity_checks(key1, key2, keys);
     }
 }
