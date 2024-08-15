@@ -14,12 +14,32 @@ pub struct MortonKey {
 
 impl MortonKey {
     pub fn new(value: i64) -> Self {
-        Self { value }
+        let key = Self { value };
+        // Make sure that Morton keys are valid (only active in debug mode)
+        debug_assert!(key.is_valid());
+        key
+    }
+
+    pub fn is_valid(&self) -> bool {
+        let level = self.value & LEVEL_MASK;
+        let key = self.value >> LEVEL_DISPLACEMENT;
+        // Check that all the bits below the level of the key are zero.
+        // Need to first create a suitable bitmask that has
+        // all bits set to one at the last DEEPEST_LEVEL - level bits.
+        let shift = 3 * (DEEPEST_LEVEL - level);
+        // The mask has now bits set to one at the last `level_diff` bits
+        let mask: i64 = (1 << shift) - 1;
+        // Is zero if and only if all the bits of the key at the `level_diff` bits are zero.
+        (mask & key) == 0
     }
 
     pub fn from_index_and_level(index: [usize; 3], level: usize) -> MortonKey {
         let level = level as i64;
         assert!(level <= DEEPEST_LEVEL);
+
+        debug_assert!(index[0] < (1 << level));
+        debug_assert!(index[1] < (1 << level));
+        debug_assert!(index[2] < (1 << level));
 
         // If we are not on the deepest level we need to shift the box.
         // The box with x-index one on DEEPEST_LEVEL-1 has index two on
@@ -79,15 +99,16 @@ impl MortonKey {
 
     pub fn parent(&self) -> Self {
         let level = self.level();
-        let parent_level = level - 1;
-        let key = self.value >> LEVEL_DISPLACEMENT;
+        assert!(level > 0);
 
-        let bit_displacement = 3 * (DEEPEST_LEVEL - parent_level as i64);
-        // Sets the last bits to zero and shifts back
-        let key = (key >> bit_displacement) << (bit_displacement + LEVEL_DISPLACEMENT);
+        // We set the bits at our current level to zero and subtract 1 at the end to reduce the
+        // level by one.
+
+        let bit_displacement = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as i64);
+        let mask = !(7 << bit_displacement);
 
         Self {
-            value: key | parent_level as i64,
+            value: (self.value & mask) - 1,
         }
     }
 
@@ -183,7 +204,7 @@ impl MortonKey {
 
         let child_level = 1 + level;
 
-        let shift = 3 * (DEEPEST_LEVEL - child_level);
+        let shift = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - child_level);
         let key = self.value;
         [
             MortonKey::new(1 + (key | (0 << shift))),
@@ -346,7 +367,6 @@ impl std::fmt::Debug for MortonKey {
 
 #[cfg(test)]
 mod test {
-    use std::hash::RandomState;
 
     use super::*;
 
@@ -459,7 +479,6 @@ mod test {
         let key = MortonKey::from_index_and_level(index, 9);
         assert!(key.is_ancestor(key));
         let ancestor = key.parent().parent();
-        println!("Ancestor {:#?}", ancestor);
         assert!(ancestor.is_ancestor(key));
     }
 
@@ -469,7 +488,6 @@ mod test {
         let key = MortonKey::from_index_and_level(index, 9);
         assert!(key.is_ancestor(key));
         let ancestor = key.parent().parent();
-        println!("Ancestor {:#?}", ancestor);
         assert!(key.ancestor_at_level(10).is_none());
         assert_eq!(key.ancestor_at_level(9).unwrap(), key);
         assert_eq!(ancestor, key.ancestor_at_level(7).unwrap());
@@ -514,7 +532,7 @@ mod test {
 
     #[test]
     fn test_children() {
-        let key = MortonKey::from_index_and_level([1, 3, 5], 3);
+        let key = MortonKey::from_index_and_level([4, 9, 8], 4);
         let children = key.children();
 
         // Check that all the children are different.
@@ -526,17 +544,17 @@ mod test {
         // Check that all children are on the correct level and that their parent is our key.
 
         for child in children {
-            assert_eq!(child.level(), 4);
+            assert_eq!(child.level(), 5);
             assert_eq!(child.parent(), key);
         }
     }
 
     #[test]
     fn test_print() {
-        let key = MortonKey::from_index_and_level([1, 3, 5], 3);
-        let parent = key.parent();
+        let key = MortonKey::from_index_and_level([0, 2, 4], 3);
+        // let key = MortonKey::new(13194139533315);
 
-        println!("{}", parent);
+        println!("Key: {}", key);
     }
 
     #[test]
@@ -545,6 +563,8 @@ mod test {
         fn sanity_checks(key1: MortonKey, key2: MortonKey, mut keys: Vec<MortonKey>) {
             // Check that keys are strictly sorted and that no key is ancestor of the next key.
 
+            let min_level = key1.level().min(key2.level());
+
             keys.insert(0, key1);
             keys.push(key2);
 
@@ -552,15 +572,37 @@ mod test {
                 assert!(k1 < k2);
                 assert!(!key1.is_ancestor(key2));
             }
+
+            // Check that level not higher than min_level
+
+            for k in keys.iter() {
+                assert!(k.level() <= min_level);
+            }
         }
 
         // Correct result for keys on one level
-        let key1 = MortonKey::from_index_and_level([0, 0, 0], 1);
-        let key2 = MortonKey::from_index_and_level([1, 1, 1], 1);
-
+        let key1 = MortonKey::from_index_and_level([0, 1, 0], 4);
+        let key2 = MortonKey::from_index_and_level([8, 4, 13], 4);
         let keys = key1.fill_between_keys(key2);
         assert!(!keys.is_empty());
 
         sanity_checks(key1, key2, keys);
+
+        // Correct result for passing same key twice
+
+        let keys = key1.fill_between_keys(key1);
+        assert!(keys.is_empty());
+
+        // Two consecutive keys should also be empty.
+
+        let children = key2.children();
+
+        let keys = children[1].fill_between_keys(children[2]);
+        assert!(keys.is_empty());
+
+        // Correct result for two keys at deepest level
     }
+
+    #[test]
+    pub fn test_complete_region() {}
 }
