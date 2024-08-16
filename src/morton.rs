@@ -4,23 +4,51 @@ use crate::constants::*;
 use itertools::Itertools;
 
 // Creating a distinct type for Morton indices
-// to distinguish from i64
+// to distinguish from u64
+
 // numbers.
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MortonKey {
-    value: i64,
+    value: u64,
 }
 
 impl MortonKey {
-    pub fn new(value: i64) -> Self {
+    /// Create a new Morton key. Users should use `[MortonKey::from_index_and_level].`
+    fn new(value: u64) -> Self {
         let key = Self { value };
         // Make sure that Morton keys are valid (only active in debug mode)
-        debug_assert!(key.is_valid());
+        debug_assert!(key.is_ill_formed());
         key
     }
 
+    /// Check if key is valid.
+    ///
+    /// A key is not valid if its highest bit is 1.
     pub fn is_valid(&self) -> bool {
+        // If the highest bit is 1 the key is by definition not valid.
+        self.value >> 63 != 1
+    }
+
+    /// Return the first deepest key.
+    pub fn deepest_first() -> Self {
+        MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize)
+    }
+
+    /// Return the last deepest key.
+    pub fn deepest_last() -> Self {
+        MortonKey::from_index_and_level(
+            [
+                LEVEL_SIZE as usize - 1,
+                LEVEL_SIZE as usize - 1,
+                LEVEL_SIZE as usize - 1,
+            ],
+            DEEPEST_LEVEL as usize,
+        )
+    }
+
+    /// A key is ill-formed if it has non-zero bits and positions that should be zero by the given level.
+    pub fn is_ill_formed(&self) -> bool {
         let level = self.value & LEVEL_MASK;
         let key = self.value >> LEVEL_DISPLACEMENT;
         // Check that all the bits below the level of the key are zero.
@@ -28,14 +56,15 @@ impl MortonKey {
         // all bits set to one at the last DEEPEST_LEVEL - level bits.
         let shift = 3 * (DEEPEST_LEVEL - level);
         // The mask has now bits set to one at the last `level_diff` bits
-        let mask: i64 = (1 << shift) - 1;
+        let mask: u64 = (1 << shift) - 1;
         // Is zero if and only if all the bits of the key at the `level_diff` bits are zero.
         (mask & key) == 0
     }
 
+    /// Create a new key by providing the [x, y, z] index and a level.
     pub fn from_index_and_level(index: [usize; 3], level: usize) -> MortonKey {
-        let level = level as i64;
-        assert!(level <= DEEPEST_LEVEL);
+        let level = level as u64;
+        debug_assert!(level <= DEEPEST_LEVEL);
 
         debug_assert!(index[0] < (1 << level));
         debug_assert!(index[1] < (1 << level));
@@ -47,11 +76,11 @@ impl MortonKey {
 
         let level_diff = DEEPEST_LEVEL - level;
 
-        let x = (index[0] as i64) << level_diff;
-        let y = (index[1] as i64) << level_diff;
-        let z = (index[2] as i64) << level_diff;
+        let x = (index[0] as u64) << level_diff;
+        let y = (index[1] as u64) << level_diff;
+        let z = (index[2] as u64) << level_diff;
 
-        let key: i64 = X_LOOKUP_ENCODE[((x >> BYTE_DISPLACEMENT) & BYTE_MASK) as usize]
+        let key: u64 = X_LOOKUP_ENCODE[((x >> BYTE_DISPLACEMENT) & BYTE_MASK) as usize]
             | Y_LOOKUP_ENCODE[((y >> BYTE_DISPLACEMENT) & BYTE_MASK) as usize]
             | Z_LOOKUP_ENCODE[((z >> BYTE_DISPLACEMENT) & BYTE_MASK) as usize];
 
@@ -64,14 +93,16 @@ impl MortonKey {
         Self { value: key | level }
     }
 
+    /// Return the level of a key.
     pub fn level(&self) -> usize {
         (self.value & LEVEL_MASK) as usize
     }
 
+    /// Decode a key and return a tuple of the form (level, [x, y, z]), where the latter is the index vector.
     pub fn decode(&self) -> (usize, [usize; 3]) {
-        fn decode_key_helper(key: i64, lookup_table: &[i64; 512]) -> i64 {
-            const N_LOOPS: i64 = 6; // 48 bits for the keys. Process in pairs of 9. So 6 passes enough.
-            let mut coord: i64 = 0;
+        fn decode_key_helper(key: u64, lookup_table: &[u64; 512]) -> u64 {
+            const N_LOOPS: u64 = 6; // 48 bits for the keys. Process in pairs of 9. So 6 passes enough.
+            let mut coord: u64 = 0;
 
             for index in 0..N_LOOPS {
                 coord |=
@@ -82,7 +113,7 @@ impl MortonKey {
         }
 
         let level = self.level();
-        let level_diff = DEEPEST_LEVEL - level as i64;
+        let level_diff = DEEPEST_LEVEL - level as u64;
 
         let key = self.value >> LEVEL_DISPLACEMENT;
 
@@ -97,6 +128,7 @@ impl MortonKey {
         (level, [x as usize, y as usize, z as usize])
     }
 
+    /// Return the parent of a key.
     pub fn parent(&self) -> Self {
         let level = self.level();
         assert!(level > 0);
@@ -104,7 +136,7 @@ impl MortonKey {
         // We set the bits at our current level to zero and subtract 1 at the end to reduce the
         // level by one.
 
-        let bit_displacement = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as i64);
+        let bit_displacement = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64);
         let mask = !(7 << bit_displacement);
 
         Self {
@@ -129,15 +161,16 @@ impl MortonKey {
 
         let key = self.value >> LEVEL_DISPLACEMENT;
 
-        let bit_displacement = 3 * (DEEPEST_LEVEL - level as i64);
+        let bit_displacement = 3 * (DEEPEST_LEVEL - level as u64);
         // Sets the last bits to zero and shifts back
         let key = (key >> bit_displacement) << (bit_displacement + LEVEL_DISPLACEMENT);
 
         Some(Self {
-            value: key | level as i64,
+            value: key | level as u64,
         })
     }
 
+    /// Check if key is ancestor of `other`. If keys are identical also returns true.
     pub fn is_ancestor(&self, other: MortonKey) -> bool {
         let my_level = self.level();
         let other_level = other.level();
@@ -149,16 +182,17 @@ impl MortonKey {
         } else {
             // We shift both keys out to 3 * DEEPEST_LEVEL - my_level
             // This gives identical bit sequences if my_key is an ancestor of other_key
-            let my_key = self.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as i64);
+            let my_key = self.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as u64);
             let other_key =
-                other.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as i64);
+                other.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as u64);
 
             my_key == other_key
         }
     }
 
-    // Return the finest common ancestor of two keys.
-    // If the keys are identical return the key itself.
+    /// Return the finest common ancestor of two keys.
+    ///
+    /// If the keys are identical return the key itself.
     pub fn finest_common_ancestor(&self, other: MortonKey) -> MortonKey {
         if *self == other {
             return *self;
@@ -173,8 +207,8 @@ impl MortonKey {
         // Remove the level information and bring second key to the same level as first key
         // After the following operation the least significant bits are associated with `first_level`.
 
-        let mut first_key = self.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as i64);
-        let mut second_key = other.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as i64);
+        let mut first_key = self.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64);
+        let mut second_key = other.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64);
 
         // Now move both keys up until they are identical.
         // At the same time we reduce the first level.
@@ -191,15 +225,16 @@ impl MortonKey {
 
         let new_level = level - count;
 
-        first_key <<= 3 * (DEEPEST_LEVEL - new_level as i64) + LEVEL_DISPLACEMENT;
+        first_key <<= 3 * (DEEPEST_LEVEL - new_level as u64) + LEVEL_DISPLACEMENT;
 
         MortonKey {
-            value: first_key | new_level as i64,
+            value: first_key | new_level as u64,
         }
     }
 
+    /// Return the 8 children of a key.
     pub fn children(&self) -> [MortonKey; 8] {
-        let level = self.level() as i64;
+        let level = self.level() as u64;
         assert!(level != DEEPEST_LEVEL);
 
         let child_level = 1 + level;
@@ -218,6 +253,7 @@ impl MortonKey {
         ]
     }
 
+    /// Remove overlaps in a sequence of keys.
     pub fn remove_overlaps<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
         let mut new_keys = Vec::<MortonKey>::new();
         if keys.is_empty() {
@@ -234,6 +270,7 @@ impl MortonKey {
         }
     }
 
+    /// Fill the region between two keys with a minimal number of keys.
     pub fn fill_between_keys(&self, key2: MortonKey) -> Vec<MortonKey> {
         // Make sure that key1 is smaller or equal key2
         let (key1, key2) = if *self < key2 {
@@ -281,6 +318,7 @@ impl MortonKey {
         result
     }
 
+    /// Complete a region ensuring that the given keys are part of the leafs.
     pub fn complete_region(keys: &[MortonKey]) -> Vec<MortonKey> {
         // First make sure that the input sequence is sorted.
         let mut keys = keys.to_vec();
@@ -373,9 +411,9 @@ mod test {
     #[test]
     fn test_z_decode_table() {
         for (index, &actual) in Z_LOOKUP_DECODE.iter().enumerate() {
-            let mut expected: i64 = (index & 1) as i64;
-            expected |= (((index >> 3) & 1) << 1) as i64;
-            expected |= (((index >> 6) & 1) << 2) as i64;
+            let mut expected: u64 = (index & 1) as u64;
+            expected |= (((index >> 3) & 1) << 1) as u64;
+            expected |= (((index >> 6) & 1) << 2) as u64;
 
             assert_eq!(actual, expected);
         }
@@ -384,9 +422,9 @@ mod test {
     #[test]
     fn test_y_decode_table() {
         for (index, &actual) in Y_LOOKUP_DECODE.iter().enumerate() {
-            let mut expected: i64 = ((index >> 1) & 1) as i64;
-            expected |= (((index >> 4) & 1) << 1) as i64;
-            expected |= (((index >> 7) & 1) << 2) as i64;
+            let mut expected: u64 = ((index >> 1) & 1) as u64;
+            expected |= (((index >> 4) & 1) << 1) as u64;
+            expected |= (((index >> 7) & 1) << 2) as u64;
 
             assert_eq!(actual, expected);
         }
@@ -395,9 +433,9 @@ mod test {
     #[test]
     fn test_x_decode_table() {
         for (index, &actual) in X_LOOKUP_DECODE.iter().enumerate() {
-            let mut expected: i64 = ((index >> 2) & 1) as i64;
-            expected |= (((index >> 5) & 1) << 1) as i64;
-            expected |= (((index >> 8) & 1) << 2) as i64;
+            let mut expected: u64 = ((index >> 2) & 1) as u64;
+            expected |= (((index >> 5) & 1) << 1) as u64;
+            expected |= (((index >> 8) & 1) << 2) as u64;
 
             assert_eq!(actual, expected);
         }
@@ -406,10 +444,10 @@ mod test {
     #[test]
     fn test_z_encode_table() {
         for (mut index, actual) in Z_LOOKUP_ENCODE.iter().enumerate() {
-            let mut sum: i64 = 0;
+            let mut sum: u64 = 0;
 
             for shift in 0..8 {
-                sum |= ((index & 1) << (3 * shift)) as i64;
+                sum |= ((index & 1) << (3 * shift)) as u64;
                 index >>= 1;
             }
 
@@ -420,10 +458,10 @@ mod test {
     #[test]
     fn test_y_encode_table() {
         for (mut index, actual) in Y_LOOKUP_ENCODE.iter().enumerate() {
-            let mut sum: i64 = 0;
+            let mut sum: u64 = 0;
 
             for shift in 0..8 {
-                sum |= ((index & 1) << (3 * shift + 1)) as i64;
+                sum |= ((index & 1) << (3 * shift + 1)) as u64;
                 index >>= 1;
             }
 
@@ -434,10 +472,10 @@ mod test {
     #[test]
     fn test_x_encode_table() {
         for (mut index, actual) in X_LOOKUP_ENCODE.iter().enumerate() {
-            let mut sum: i64 = 0;
+            let mut sum: u64 = 0;
 
             for shift in 0..8 {
-                sum |= ((index & 1) << (3 * shift + 2)) as i64;
+                sum |= ((index & 1) << (3 * shift + 2)) as u64;
                 index >>= 1;
             }
 
@@ -609,18 +647,36 @@ mod test {
         fn sanity_checks(keys: &[MortonKey], complete_region: &[MortonKey]) {
             // Check that keys are strictly sorted and that no key is ancestor of the next key.
 
-            let min_level = keys.iter().min().unwrap();
+            if !keys.is_empty() {
+                // Min level of input keys.
+                let max_level = keys.iter().max_by_key(|item| item.level()).unwrap().level();
+                for k in complete_region.iter() {
+                    assert!(k.level() <= max_level);
+                }
+            }
 
-            for (k1, k2) in keys.iter().tuple_windows() {
+            // Check that completed region has sorted keys and no overlaps.
+            for (&k1, &k2) in complete_region.iter().tuple_windows() {
                 assert!(k1 < k2);
-                assert!(!key1.is_ancestor(key2));
+                assert!(!k1.is_ancestor(k2));
             }
 
             // Check that level not higher than min_level
 
-            for k in keys.iter() {
-                assert!(k.level() <= min_level);
-            }
+            // Check that first key is ancestor of first in deepest level
+            // and that last key is ancestor of last in deepest level.
+            let deepest_first = MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize);
+            let deepest_last = MortonKey::from_index_and_level(
+                [
+                    LEVEL_SIZE as usize - 1,
+                    LEVEL_SIZE as usize - 1,
+                    LEVEL_SIZE as usize - 1,
+                ],
+                DEEPEST_LEVEL as usize,
+            );
+
+            assert!(complete_region.first().unwrap().is_ancestor(deepest_first));
+            assert!(complete_region.last().unwrap().is_ancestor(deepest_last));
         }
 
         // Create 3 Morton keys around which to complete region.
@@ -631,6 +687,19 @@ mod test {
 
         let keys = [key1, key2, key3];
 
-        let keys = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_region(keys.as_slice());
+
+        sanity_checks(keys.as_slice(), complete_region.as_slice());
+
+        // For an empty slice the complete region method should just add the root of the tree.
+        let keys = Vec::<MortonKey>::new();
+        let complete_region = MortonKey::complete_region(keys.as_slice());
+        assert_eq!(complete_region.len(), 1);
+
+        sanity_checks(keys.as_slice(), complete_region.as_slice());
+
+        // Choose a region where the first and last key are ancestors of deepest first and deepest last.
+
+        let keys = [MortonKey::deepest_first(), MortonKey::deepest_last()];
     }
 }
