@@ -701,5 +701,9 @@ mod test {
         // Choose a region where the first and last key are ancestors of deepest first and deepest last.
 
         let keys = [MortonKey::deepest_first(), MortonKey::deepest_last()];
+
+        let complete_region = MortonKey::complete_region(keys.as_slice());
+
+        sanity_checks(keys.as_slice(), complete_region.as_slice());
     }
 }
