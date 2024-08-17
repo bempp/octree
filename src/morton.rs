@@ -1,6 +1,9 @@
 //! Routines for working with Morton indices.
 
+use std::collections::HashSet;
+
 use crate::constants::*;
+use itertools::izip;
 use itertools::Itertools;
 
 // Creating a distinct type for Morton indices
@@ -13,29 +16,49 @@ pub struct MortonKey {
     value: u64,
 }
 
+impl Default for MortonKey {
+    fn default() -> Self {
+        MortonKey::invalid_key()
+    }
+}
+
 impl MortonKey {
     /// Create a new Morton key. Users should use `[MortonKey::from_index_and_level].`
     fn new(value: u64) -> Self {
         let key = Self { value };
         // Make sure that Morton keys are valid (only active in debug mode)
-        debug_assert!(key.is_ill_formed());
+        debug_assert!(key.is_well_formed());
         key
+    }
+
+    /// Check if a key is invalid.
+    pub fn invalid_key() -> Self {
+        Self { value: 1 << 63 }
     }
 
     /// Check if key is valid.
     ///
     /// A key is not valid if its highest bit is 1.
+    #[inline(always)]
     pub fn is_valid(&self) -> bool {
         // If the highest bit is 1 the key is by definition not valid.
         self.value >> 63 != 1
     }
 
+    /// Create a root key
+    #[inline(always)]
+    pub fn root() -> MortonKey {
+        Self { value: 0 }
+    }
+
     /// Return the first deepest key.
+    #[inline(always)]
     pub fn deepest_first() -> Self {
         MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize)
     }
 
     /// Return the last deepest key.
+    #[inline(always)]
     pub fn deepest_last() -> Self {
         MortonKey::from_index_and_level(
             [
@@ -47,8 +70,42 @@ impl MortonKey {
         )
     }
 
+    /// Return key in a given direction.
+    ///
+    /// Returns an invalid key if there is no valid key in that direction.
+    pub fn key_in_direction(&self, direction: [i64; 3]) -> MortonKey {
+        let (level, [x, y, z]) = self.decode();
+        let level_size = 1 << level;
+
+        let new_index = [
+            x as i64 + direction[0],
+            y as i64 + direction[1],
+            z as i64 + direction[2],
+        ];
+
+        if 0 <= new_index[0]
+            && new_index[0] < level_size
+            && 0 <= new_index[1]
+            && new_index[1] < level_size
+            && 0 <= new_index[2]
+            && new_index[2] < level_size
+        {
+            MortonKey::from_index_and_level(
+                [
+                    new_index[0] as usize,
+                    new_index[1] as usize,
+                    new_index[2] as usize,
+                ],
+                level,
+            )
+        } else {
+            MortonKey::invalid_key()
+        }
+    }
+
     /// A key is ill-formed if it has non-zero bits and positions that should be zero by the given level.
-    pub fn is_ill_formed(&self) -> bool {
+    #[inline(always)]
+    pub fn is_well_formed(&self) -> bool {
         let level = self.value & LEVEL_MASK;
         let key = self.value >> LEVEL_DISPLACEMENT;
         // Check that all the bits below the level of the key are zero.
@@ -94,6 +151,7 @@ impl MortonKey {
     }
 
     /// Return the level of a key.
+    #[inline(always)]
     pub fn level(&self) -> usize {
         (self.value & LEVEL_MASK) as usize
     }
@@ -129,6 +187,7 @@ impl MortonKey {
     }
 
     /// Return the parent of a key.
+    #[inline(always)]
     pub fn parent(&self) -> Self {
         let level = self.level();
         assert!(level > 0);
@@ -171,6 +230,7 @@ impl MortonKey {
     }
 
     /// Check if key is ancestor of `other`. If keys are identical also returns true.
+    #[inline(always)]
     pub fn is_ancestor(&self, other: MortonKey) -> bool {
         let my_level = self.level();
         let other_level = other.level();
@@ -232,7 +292,14 @@ impl MortonKey {
         }
     }
 
+    /// Return true if key is equal to the root key.
+    #[inline(always)]
+    pub fn is_root(&self) -> bool {
+        self.value == 0
+    }
+
     /// Return the 8 children of a key.
+    #[inline(always)]
     pub fn children(&self) -> [MortonKey; 8] {
         let level = self.level() as u64;
         assert!(level != DEEPEST_LEVEL);
@@ -253,12 +320,59 @@ impl MortonKey {
         ]
     }
 
-    /// Remove overlaps in a sequence of keys.
-    pub fn remove_overlaps<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
+    /// Return the 8 siblings of a key.
+    ///
+    /// The key itself is part of the siblings.
+    pub fn siblings(&self) -> [MortonKey; 8] {
+        assert!(!self.is_root());
+        self.parent().children()
+    }
+
+    /// Return the neighbours of a key.
+    ///
+    /// The key itself is not part of the neighbours.
+    /// If along a certain direction there is no neighbour then
+    ///  an invalid key is stored.
+    pub fn neighbours(&self) -> [MortonKey; 26] {
+        let mut result = [MortonKey::default(); 26];
+
+        let (level, [x, y, z]) = self.decode();
+        let level_size = 1 << level;
+
+        for (direction, res) in izip!(DIRECTIONS, result.iter_mut()) {
+            let new_index = [
+                x as i64 + direction[0],
+                y as i64 + direction[1],
+                z as i64 + direction[2],
+            ];
+            if 0 <= new_index[0]
+                && new_index[0] < level_size
+                && 0 <= new_index[1]
+                && new_index[1] < level_size
+                && 0 <= new_index[2]
+                && new_index[2] < level_size
+            {
+                *res = MortonKey::from_index_and_level(
+                    [
+                        new_index[0] as usize,
+                        new_index[1] as usize,
+                        new_index[2] as usize,
+                    ],
+                    level,
+                );
+            }
+        }
+        result
+    }
+
+    /// Linearize by sorting and removing overlaps.
+    pub fn linearize(keys: &[MortonKey]) -> Vec<MortonKey> {
         let mut new_keys = Vec::<MortonKey>::new();
         if keys.is_empty() {
             new_keys
         } else {
+            let mut keys = keys.to_vec();
+            keys.sort_unstable();
             for (m1, m2) in keys.iter().tuple_windows() {
                 if m1 == m2 || m1.is_ancestor(*m2) {
                     continue;
@@ -376,6 +490,24 @@ impl MortonKey {
         result.push(*keys.last().unwrap());
         // We do not sort the keys. They are already sorted.
         result
+    }
+
+    pub fn balance(keys: &[MortonKey], root: MortonKey) -> Vec<MortonKey> {
+        let mut work_set: HashSet<MortonKey> = keys.iter().cloned().collect();
+        let deepest_level = keys.iter().map(|key| key.level()).max().unwrap();
+        let root_level = root.level();
+        #[cfg(debug_assertions)]
+        {
+            for key in keys {
+                assert!(key.level() >= root_level);
+            }
+        }
+
+        // Linearize the keys
+        let keys = MortonKey::linearize(keys);
+
+        // Now go through and make sure that for each key siblings and neighbours of parents are added
+        todo!();
     }
 }
 
@@ -705,5 +837,74 @@ mod test {
         let complete_region = MortonKey::complete_region(keys.as_slice());
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
+    }
+
+    #[test]
+    pub fn test_neighbour_directions_unique() {
+        let neighbour_set: HashSet<[i64; 3]> = HashSet::from_iter(DIRECTIONS.iter().copied());
+        assert_eq!(neighbour_set.len(), 26);
+    }
+
+    #[test]
+    pub fn test_invalid_keys() {
+        let invalid_key = MortonKey::invalid_key();
+
+        // Make sure that an invalid key is invalid.
+        assert!(!invalid_key.is_valid());
+
+        // Make sure that an invalid key is not ill-formed.
+        assert!(invalid_key.is_well_formed());
+    }
+
+    #[test]
+    pub fn test_neighbours() {
+        // Check that root only has invalid neighbors.
+        let neighbours = MortonKey::root().neighbours();
+        for key in neighbours {
+            assert!(!key.is_valid());
+        }
+
+        // Now check inside a tree that all neighbours exist and that their distance to key corresponds
+        // to the corresponding directions vector.
+
+        let index = [33, 798, 56];
+        let level = 11;
+        let key = MortonKey::from_index_and_level(index, level);
+        let neighbours = key.neighbours();
+        for (dir, key) in izip!(DIRECTIONS, neighbours) {
+            assert!(key.is_valid());
+            let (level, key_index) = key.decode();
+            assert_eq!(key.level(), level);
+            let direction: [i64; 3] = [
+                key_index[0] as i64 - index[0] as i64,
+                key_index[1] as i64 - index[1] as i64,
+                key_index[2] as i64 - index[2] as i64,
+            ];
+            assert_eq!(direction, dir);
+        }
+    }
+
+    #[test]
+    pub fn test_key_in_direction() {
+        // Now check inside a tree that all neighbours exist and that their distance to key corresponds
+        // to the corresponding directions vector.
+
+        let index = [33, 798, 56];
+        let dir = [2, 5, -3];
+        let level = 11;
+        let key = MortonKey::from_index_and_level(index, level);
+        let new_key = key.key_in_direction(dir);
+
+        let (new_level, new_index) = new_key.decode();
+        assert_eq!(new_level, level);
+        assert_eq!(new_index[0] as i64, index[0] as i64 + dir[0]);
+        assert_eq!(new_index[1] as i64, index[1] as i64 + dir[1]);
+        assert_eq!(new_index[2] as i64, index[2] as i64 + dir[2]);
+
+        // Now test a direction that gives an invalid key.
+
+        let dir = [-34, 798, 56];
+        let new_key = key.key_in_direction(dir);
+        assert!(!new_key.is_valid());
     }
 }
