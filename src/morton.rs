@@ -235,6 +235,10 @@ impl MortonKey {
         let my_level = self.level();
         let other_level = other.level();
 
+        if !self.is_valid() || !other.is_valid() {
+            return false;
+        }
+
         if *self == other {
             true
         } else if my_level > other_level {
@@ -492,22 +496,172 @@ impl MortonKey {
         result
     }
 
-    pub fn balance(keys: &[MortonKey], root: MortonKey) -> Vec<MortonKey> {
-        let mut work_set: HashSet<MortonKey> = keys.iter().cloned().collect();
-        let deepest_level = keys.iter().map(|key| key.level()).max().unwrap();
-        let root_level = root.level();
-        #[cfg(debug_assertions)]
-        {
-            for key in keys {
-                assert!(key.level() >= root_level);
+    /// Get all interior keys for an Octree represented by a list of Morton keys
+    ///
+    /// Adds the root at level 0 if the root is not a leaf if the octree.
+    /// If `keys` only contains the root of the tree then the returned set is empty.
+    pub fn get_interior_keys(keys: &[MortonKey]) -> HashSet<MortonKey> {
+        let mut interior_keys = HashSet::<MortonKey>::new();
+
+        let keys = MortonKey::linearize(keys);
+
+        for &key in &keys {
+            if key.level() > 0 {
+                let mut p = key.parent();
+                while p.level() > 0 && !interior_keys.contains(&p) {
+                    interior_keys.insert(p);
+                    p = p.parent();
+                }
             }
         }
 
-        // Linearize the keys
-        let keys = MortonKey::linearize(keys);
+        if !keys.contains(&MortonKey::root()) {
+            interior_keys.insert(MortonKey::root());
+        }
+
+        interior_keys
+    }
+
+    /// Return interior and leaf keys.
+    pub fn get_interior_and_leaf_keys(keys: &[MortonKey]) -> HashSet<MortonKey> {
+        let mut all_keys = MortonKey::get_interior_keys(keys);
+        all_keys.extend(keys.iter());
+        all_keys
+    }
+
+    /// Check if a list of Morton keys represent a complete linear tree.
+    pub fn is_complete_linear_octree(keys: &[MortonKey]) -> bool {
+        // First check if the list is sorted.
+        for (key1, key2) in keys.iter().tuple_windows() {
+            if key1 > key2 {
+                return false;
+            }
+        }
+
+        // Now check that all interior keys have 8 children.
+
+        let interior_keys = MortonKey::get_interior_keys(keys);
+        let mut all_keys = HashSet::<MortonKey>::from_iter(interior_keys.iter().copied());
+        all_keys.extend(keys.iter());
+
+        for key in interior_keys {
+            let children = key.children();
+            for child in children {
+                if !all_keys.contains(&child) {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    /// Balance a list of Morton keys with respect to a root key.
+    pub fn balance(keys: &[MortonKey], root: MortonKey) -> Vec<MortonKey> {
+        let keys = keys
+            .iter()
+            .copied()
+            .filter(|&key| root.is_ancestor(key))
+            .collect_vec();
+
+        if keys.is_empty() {
+            return Vec::<MortonKey>::new();
+        }
+
+        let deepest_level = keys.iter().map(|key| key.level()).max().unwrap();
+        let root_level = root.level();
+
+        if deepest_level == root_level {
+            return vec![root];
+        }
+
+        // Start with keys at deepest level
+        let mut work_list = keys
+            .iter()
+            .copied()
+            .filter(|&key| key.level() == deepest_level)
+            .collect_vec();
+
+        let mut result = Vec::<MortonKey>::new();
 
         // Now go through and make sure that for each key siblings and neighbours of parents are added
-        todo!();
+
+        for level in ((1 + root_level)..=deepest_level).rev() {
+            let mut parents = HashSet::<MortonKey>::new();
+            let mut new_work_list = Vec::<MortonKey>::new();
+            // We filter the work list by level and also make sure that
+            // only one sibling of each of the parents children is added to
+            // our current level list.
+            for key in work_list.iter() {
+                let parent = key.parent();
+                if !parents.contains(&parent) {
+                    parents.insert(parent);
+                    result.extend_from_slice(key.siblings().as_slice());
+                    new_work_list.extend_from_slice(
+                        parent
+                            .neighbours()
+                            .iter()
+                            .copied()
+                            .filter(|&key| root.is_ancestor(key))
+                            .collect_vec()
+                            .as_slice(),
+                    );
+                }
+            }
+            new_work_list.extend_from_slice(
+                keys.iter()
+                    .copied()
+                    .filter(|&key| key.level() == level - 1)
+                    .collect_vec()
+                    .as_slice(),
+            );
+
+            work_list = new_work_list;
+            // Now extend the work list with the
+        }
+
+        MortonKey::linearize(result.as_slice())
+    }
+
+    /// Returns true if an Octree is linear, complete, and, balanced.
+    pub fn is_complete_linear_and_balanced(keys: &[MortonKey]) -> bool {
+        // First check that it is complete and linear.
+
+        if !MortonKey::is_complete_linear_octree(keys) {
+            return false;
+        }
+
+        // Now check that it is balanced.
+        // We add for each key the neighbors of the parents. If
+        // we then linearize and the set of keys is identicial the octree
+        // was balanced. Otherwise, some key are replaced in the linearisation
+        // through desendents on a deeper level and the two lists are not
+        // identical.
+
+        let mut new_keys = keys.to_vec();
+        for key in keys {
+            new_keys.extend(
+                key.parent()
+                    .neighbours()
+                    .iter()
+                    .copied()
+                    .filter(|&key| key.is_valid()),
+            );
+        }
+
+        let new_keys = MortonKey::linearize(&new_keys);
+
+        if new_keys.len() != keys.len() {
+            return false;
+        } else {
+            for (&key1, key2) in izip!(keys, new_keys) {
+                if key1 != key2 {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 }
 
@@ -906,5 +1060,117 @@ mod test {
         let dir = [-34, 798, 56];
         let new_key = key.key_in_direction(dir);
         assert!(!new_key.is_valid());
+    }
+
+    #[test]
+    pub fn test_balanced() {
+        // Balance the second level of a tree.
+
+        let balanced = MortonKey::balance(
+            [MortonKey::from_index_and_level([0, 1, 0], 2)].as_slice(),
+            MortonKey::root(),
+        );
+
+        assert!(MortonKey::is_complete_linear_octree(&balanced));
+
+        // Try a few keys on deeper levels
+
+        let key1 = MortonKey::from_index_and_level([17, 35, 48], 9);
+        let key2 = MortonKey::from_index_and_level([355, 25, 67], 9);
+        let key3 = MortonKey::from_index_and_level([0, 0, 0], 8);
+
+        // Just make sure one is not ancestor of the other. Does not matter for routine.
+        // But want to avoid for unit test checks.
+        assert!(!key3.is_ancestor(key1));
+
+        let balanced = MortonKey::balance([key1, key2, key3].as_slice(), MortonKey::root());
+
+        assert!(MortonKey::is_complete_linear_octree(&balanced));
+
+        // Let us now check balancing with respec to a single given key.
+
+        // We start with all keys on level 1. We replace the first key
+        // by its descendents two levels down and linearize. The
+        // resulting octree is complete and linear but not balanced.
+        // However, the subtree under [0, 0, 0,] on level 1 is balanced.
+
+        let mut keys = vec![
+            MortonKey::from_index_and_level([0, 0, 0], 1),
+            MortonKey::from_index_and_level([0, 0, 1], 1),
+            MortonKey::from_index_and_level([0, 1, 0], 1),
+            MortonKey::from_index_and_level([1, 0, 0], 1),
+            MortonKey::from_index_and_level([0, 1, 1], 1),
+            MortonKey::from_index_and_level([1, 1, 0], 1),
+            MortonKey::from_index_and_level([1, 0, 1], 1),
+            MortonKey::from_index_and_level([1, 1, 1], 1),
+        ];
+
+        // We recurse twice to get 64 children on level 3 from the first box.
+        let seed = MortonKey::from_index_and_level([0, 0, 0], 1);
+        let children = seed.children();
+        let mut descendents = Vec::<MortonKey>::new();
+        for child in children {
+            descendents.extend(child.children());
+        }
+
+        // We add all those children to the tree and linearize.
+        keys.extend(descendents.iter());
+
+        let keys = MortonKey::linearize(&keys);
+
+        let subtree_balanced =
+            MortonKey::balance(&keys, MortonKey::from_index_and_level([0, 0, 0], 1));
+
+        // Check that this balanced subtree has 64 elements.
+
+        assert_eq!(subtree_balanced.len(), 64);
+    }
+
+    #[test]
+    pub fn test_is_complete_linear_and_balanced() {
+        // First we create an unbalanced Octree.
+        // We start with all keys at level 1 and then recurse one of the keys
+        // two times and linearize.
+
+        let mut keys = vec![
+            MortonKey::from_index_and_level([0, 0, 0], 1),
+            MortonKey::from_index_and_level([0, 0, 1], 1),
+            MortonKey::from_index_and_level([0, 1, 0], 1),
+            MortonKey::from_index_and_level([1, 0, 0], 1),
+            MortonKey::from_index_and_level([0, 1, 1], 1),
+            MortonKey::from_index_and_level([1, 1, 0], 1),
+            MortonKey::from_index_and_level([1, 0, 1], 1),
+            MortonKey::from_index_and_level([1, 1, 1], 1),
+        ];
+
+        // We recurse twice to get 64 children on level 3 from the first box.
+        let seed = MortonKey::from_index_and_level([0, 0, 0], 1);
+        let children = seed.children();
+        let mut descendents = Vec::<MortonKey>::new();
+        for child in children {
+            descendents.extend(child.children());
+        }
+
+        // We add all those children to the tree and linearize.
+        keys.extend(descendents.iter());
+
+        let keys = MortonKey::linearize(&keys);
+
+        // This tree should be complete and linear.
+        assert!(MortonKey::is_complete_linear_octree(&keys));
+
+        // However, it should not be balanced.
+        assert!(!MortonKey::is_complete_linear_and_balanced(&keys));
+
+        // Now balance it.
+        let keys = MortonKey::balance(&keys, MortonKey::root());
+        // Now the balancing check should be true
+        assert!(MortonKey::is_complete_linear_and_balanced(&keys));
+
+        // The balanced tree should have 120 keys. It should have
+        // 64 keys on level 3 and then all the other 7 boxes on level 1
+        // should have been replaced by their refinement on level 2. Hence,
+        // we have 64 + 56 = 120 keys.
+        assert_eq!(keys.len(), 120);
     }
 }
