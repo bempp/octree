@@ -49,12 +49,20 @@ impl PhysicalBox {
         // than the actual point set to avoid issues
         // at the edge of the bounding box.
 
-        xmin *= 1.0 + f64::EPSILON;
-        xmax *= 1.0 + f64::EPSILON;
-        ymin *= 1.0 + f64::EPSILON;
-        ymax *= 1.0 + f64::EPSILON;
-        zmin *= 1.0 + f64::EPSILON;
-        zmax *= 1.0 + f64::EPSILON;
+        let xdiam = xmax - xmin;
+        let ydiam = ymax - ymin;
+        let zdiam = zmax - zmin;
+
+        // We increase each dimension by
+        // 10^-5 * the diameter of that
+        // dimension.
+
+        xmin -= 0.5 * 1E-5 * xdiam;
+        xmax += 0.5 * 1E-5 * xdiam;
+        ymin -= 0.5 * 1E-5 * ydiam;
+        ymax += 0.5 * 1E-5 * ydiam;
+        zmin -= 0.5 * 1E-5 * zdiam;
+        zmax += 0.5 * 1E-5 * zdiam;
 
         PhysicalBox {
             coords: [xmin, ymin, zmin, xmax, ymax, zmax],
@@ -85,6 +93,41 @@ impl PhysicalBox {
             (point[0] - xmin) / (xmax - xmin),
             (point[1] - ymin) / (ymax - ymin),
             (point[2] - zmin) / (zmax - zmin),
+        ]
+    }
+
+    /// Return an ordered list of corners of the box.
+    ///
+    /// The ordering of the corners on the unit cube is
+    /// [0, 0, 0]
+    /// [1, 0, 0]
+    /// [1, 1, 0]
+    /// [0, 1, 0]
+    /// [0, 0, 1]
+    /// [1, 0, 1]
+    /// [1, 1, 1]
+    /// [0, 1, 1]
+    pub fn corners(&self) -> [[f64; 3]; 8] {
+        let reference_points = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+
+        [
+            self.reference_to_physical(reference_points[0]),
+            self.reference_to_physical(reference_points[1]),
+            self.reference_to_physical(reference_points[2]),
+            self.reference_to_physical(reference_points[3]),
+            self.reference_to_physical(reference_points[4]),
+            self.reference_to_physical(reference_points[5]),
+            self.reference_to_physical(reference_points[6]),
+            self.reference_to_physical(reference_points[7]),
         ]
     }
 }

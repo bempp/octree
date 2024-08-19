@@ -29,6 +29,7 @@ rand_distr = "0.4.3"
 bitflags = "2.6.0"
 bytemuck = "1.*"
 coe-rs = "0.1.2"
+vtkio = "0.6.*"
 
 [dev-dependencies]
 criterion = { version = "0.5.*", features = ["html_reports"]}

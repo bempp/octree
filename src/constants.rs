@@ -3,6 +3,8 @@
 /// Maximum possible level of octree recursion, by definition.
 pub const DEEPEST_LEVEL: u64 = 16;
 
+pub const NLEVELS: usize = 1 + DEEPEST_LEVEL as usize;
+
 /// The 'size' of each level in terms of octants along each axis, at the maximum depth of recursion.
 pub const LEVEL_SIZE: u64 = 65536;
 
