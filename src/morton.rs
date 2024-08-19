@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use crate::constants::*;
+use crate::geometry::PhysicalBox;
 use itertools::izip;
 use itertools::Itertools;
 
@@ -70,6 +71,30 @@ impl MortonKey {
         )
     }
 
+    /// Return the associated physical box with respect to a bounding box.
+    #[inline(always)]
+    pub fn physical_box(&self, bounding_box: &PhysicalBox) -> PhysicalBox {
+        let (level, [x, y, z]) = self.decode();
+        let xind = x as f64;
+        let yind = y as f64;
+        let zind = z as f64;
+
+        let [xmin, ymin, zmin, xmax, ymax, zmax] = bounding_box.coordinates();
+        let level_size = (1 << level) as f64;
+        let xlength = (xmax - xmin) / level_size;
+        let ylength = (ymax - ymin) / level_size;
+        let zlength = (zmax - zmin) / level_size;
+
+        PhysicalBox::new([
+            xmin + xind * xlength,
+            ymin + yind * ylength,
+            zmin + zind * zlength,
+            xmin + (1.0 + xind) * xlength,
+            ymin + (1.0 + yind) * ylength,
+            zmin + (1.0 + zind) * zlength,
+        ])
+    }
+
     /// Return key in a given direction.
     ///
     /// Returns an invalid key if there is no valid key in that direction.
@@ -116,6 +141,18 @@ impl MortonKey {
         let mask: u64 = (1 << shift) - 1;
         // Is zero if and only if all the bits of the key at the `level_diff` bits are zero.
         (mask & key) == 0
+    }
+
+    /// Map a physical point within a bounding box to a Morton key on a given level.
+    /// It is assumed that points are strictly contained within the bounding box.
+    pub fn from_physical_point(point: [f64; 3], bounding_box: &PhysicalBox, level: usize) -> Self {
+        let level_size = 1 << level;
+        let reference = bounding_box.physical_to_reference(point);
+        let x = (reference[0] * level_size as f64) as usize;
+        let y = (reference[1] * level_size as f64) as usize;
+        let z = (reference[2] * level_size as f64) as usize;
+
+        MortonKey::from_index_and_level([x, y, z], level)
     }
 
     /// Create a new key by providing the [x, y, z] index and a level.
@@ -1124,6 +1161,12 @@ mod test {
         // Check that this balanced subtree has 64 elements.
 
         assert_eq!(subtree_balanced.len(), 64);
+
+        // Check that each of the subtree elements lives on level 3.
+
+        for &key in &subtree_balanced {
+            assert_eq!(key.level(), 3);
+        }
     }
 
     #[test]
@@ -1172,5 +1215,25 @@ mod test {
         // should have been replaced by their refinement on level 2. Hence,
         // we have 64 + 56 = 120 keys.
         assert_eq!(keys.len(), 120);
+    }
+
+    #[test]
+    pub fn test_from_physical_point() {
+        let bounding_box = PhysicalBox::new([-2.0, -3.0, -1.0, 4.0, 5.0, 6.0]);
+
+        let point = [1.5, -2.5, 5.0];
+        let level = 10;
+
+        let key = MortonKey::from_physical_point(point, &bounding_box, level);
+
+        let physical_box = key.physical_box(&bounding_box);
+
+        let coords = physical_box.coordinates();
+
+        assert!(coords[0] <= point[0] && point[0] < coords[3]);
+        assert!(coords[1] <= point[1] && point[1] < coords[4]);
+        assert!(coords[2] <= point[2] && point[2] < coords[5]);
+
+        // Now compute the box.
     }
 }

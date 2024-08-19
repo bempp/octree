@@ -1,127 +1,148 @@
 //! Definition of a linear octree
-//!
-//! A linear octree is a sorted collection of Morton keys.
 
-use crate::{
-    constants::{DEEPEST_LEVEL, LEVEL_SIZE, NSIBLINGS},
-    morton::MortonKey,
-};
-use itertools::Itertools;
+use std::collections::HashMap;
+
+use bytemuck;
+
+use crate::{constants::DEEPEST_LEVEL, geometry::PhysicalBox, morton::MortonKey};
 
 pub struct Octree {
-    keys: Vec<MortonKey>,
+    leaf_keys: Vec<MortonKey>,
+    points: Vec<[f64; 3]>,
+    point_to_level_keys: [Vec<MortonKey>; 1 + DEEPEST_LEVEL as usize],
+    bounding_box: PhysicalBox,
+    key_counts: HashMap<MortonKey, usize>,
 }
 
-pub fn remove_overlaps<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
-    let mut new_keys = Vec::<MortonKey>::new();
-    if keys.is_empty() {
-        new_keys
-    } else {
-        for (m1, m2) in keys.iter().tuple_windows() {
-            if m1 == m2 || m1.is_ancestor(*m2) {
-                continue;
-            }
-            new_keys.push(*m1)
-        }
-        new_keys.push(*keys.last().unwrap());
-        new_keys
-    }
-}
+impl Octree {
+    pub fn from_points(points: &[f64], max_level: usize, max_points_per_box: usize) -> Self {
+        // Make sure that the points array is a multiple of 3.
+        assert_eq!(points.len() % 3, 0);
 
-pub fn fill_between_two_keys(key1: MortonKey, key2: MortonKey) -> Vec<MortonKey> {
-    // If one is the ancestor of the other the region between them is already filled.
-    if key1.is_ancestor(key2) || key2.is_ancestor(key1) {
-        return Vec::<MortonKey>::new();
-    }
-
-    // The finest common ancestor is always closer to the root than either key
-    // if key1 is not an ancestor of key2 or vice versa.
-    let ancestor = key1.finest_common_ancestor(key2);
-    let children = ancestor.children();
-
-    let mut result = Vec::<MortonKey>::new();
-
-    let mut work_set = Vec::<MortonKey>::from_iter(children.iter().copied());
-
-    while let Some(item) = work_set.pop() {
-        // If the item is either key we don't want it in the result.
-        if item == key1 || item == key2 {
-            continue;
-        }
-        // We want items that are strictly between the two keys and are not ancestors of either.
-        // We do not check specifically if item is an ancestor of key1 as then it would be smaller than key1.
-        else if key1 < item && item < key2 && !item.is_ancestor(key2) {
-            result.push(item);
+        // Make sure that max level never exceeds DEEPEST_LEVEL
+        let max_level = if max_level > DEEPEST_LEVEL as usize {
+            DEEPEST_LEVEL as usize
         } else {
-            // If the item is an ancestor of key1 or key2 just refine to the children and try again.
-            // Note we already exclude that item is identical to key1 or key2.
-            // So if item is an ancestor of either its children cannot have a level larger than key1 or key2.
-            if item.is_ancestor(key1) || item.is_ancestor(key2) {
-                let children = item.children();
-                work_set.extend(children.iter());
+            max_level
+        };
+
+        // Compute the physical bounding box.
+        let bounding_box = PhysicalBox::from_points(points);
+
+        // Bunch the points in arrays of 3.
+
+        let points: &[[f64; 3]] = bytemuck::cast_slice(points);
+        let npoints = points.len();
+
+        // We create a vector of keys for each point on each level. We compute the
+        // keys on the deepest level and fill the other levels by going from
+        // parent to parent.
+
+        let mut point_to_level_keys: [Vec<MortonKey>; 1 + DEEPEST_LEVEL as usize] =
+            Default::default();
+        point_to_level_keys[DEEPEST_LEVEL as usize] = points
+            .iter()
+            .map(|&point| {
+                MortonKey::from_physical_point(point, &bounding_box, DEEPEST_LEVEL as usize)
+            })
+            .collect::<Vec<_>>();
+
+        for index in (1..=DEEPEST_LEVEL as usize).rev() {
+            let mut new_vec = Vec::<MortonKey>::with_capacity(npoints);
+            for &key in &point_to_level_keys[index] {
+                new_vec.push(key.parent());
+            }
+            point_to_level_keys[index - 1] = new_vec;
+        }
+
+        // We now have to create level keys. We are starting at the root and recursing
+        // down until each box has fewer than max_points_per_box keys.
+
+        // First we compute the counts of each key on each level. For that we create
+        // for each level a Hashmap for the keys and then add up.
+
+        let mut key_counts: HashMap<MortonKey, usize> = Default::default();
+
+        for index in 0..=DEEPEST_LEVEL as usize {
+            for key in &point_to_level_keys[index] {
+                *key_counts.entry(*key).or_default() += 1;
             }
         }
-    }
 
-    result.sort_unstable();
-    result
-}
+        // We can now easily create an adaptive tree by subdividing. We do this by
+        // a recursive function.
 
-pub fn complete_region<Iter: Iterator<Item = MortonKey>>(keys: &[MortonKey]) -> Vec<MortonKey> {
-    // First make sure that the input sequence is sorted.
-    let mut keys = keys.to_vec();
-    keys.sort_unstable();
+        let mut leaf_keys = Vec::<MortonKey>::new();
 
-    let mut result = Vec::<MortonKey>::new();
+        fn recurse_keys(
+            key: MortonKey,
+            key_counts: &HashMap<MortonKey, usize>,
+            leaf_keys: &mut Vec<MortonKey>,
+            max_points_per_box: usize,
+            max_level: usize,
+        ) {
+            let level = key.level();
+            // A key may have not be associated with points. This happens if one of the children on
+            // the previous level has no points in its physical box. However, we want to create a
+            // complete tree. So we still add this one empty child.
+            if let Some(&count) = key_counts.get(&key) {
+                if count > max_points_per_box && level < max_level {
+                    for child in key.children() {
+                        recurse_keys(child, key_counts, leaf_keys, max_points_per_box, max_level);
+                    }
+                } else {
+                    leaf_keys.push(key)
+                }
+            } else {
+                leaf_keys.push(key)
+            }
+        }
 
-    // Special case of empty keys.
-    if keys.len() == 0 {
-        result.push(MortonKey::from_index_and_level([0, 0, 0], 0));
-        return result;
-    }
+        // Now execute the recursion starting from root
 
-    // If a single element is given then just return the result if it is the root of the tree.
-    if keys.len() == 1 {
-        if result[0] == MortonKey::from_index_and_level([0, 0, 0], 0) {
-            return result;
+        recurse_keys(
+            MortonKey::root(),
+            &mut key_counts,
+            &mut leaf_keys,
+            max_points_per_box,
+            max_level,
+        );
+
+        // The leaf keys are now a complete linear tree. But they are not yet balanced.
+        // In the final step we balance the leafs.
+
+        let leaf_keys = MortonKey::balance(&leaf_keys, MortonKey::root());
+
+        Self {
+            leaf_keys,
+            points: points.to_vec(),
+            point_to_level_keys,
+            bounding_box,
+            key_counts,
         }
     }
 
-    let deepest_first = MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize);
-    let deepest_last = MortonKey::from_index_and_level(
-        [
-            LEVEL_SIZE as usize - 1,
-            LEVEL_SIZE as usize - 1,
-            LEVEL_SIZE as usize - 1,
-        ],
-        DEEPEST_LEVEL as usize,
-    );
-
-    // If the first key is not an ancestor of the deepest possible first element in the
-    // tree get the finest ancestor between the two and use the first child of that.
-
-    let first_key = *keys.first().unwrap();
-    let last_key = *keys.last().unwrap();
-
-    if !first_key.is_ancestor(deepest_first) {
-        let ancestor = deepest_first.finest_common_ancestor(first_key);
-        keys.insert(0, ancestor.children()[0]);
+    pub fn leaf_keys(&self) -> &Vec<MortonKey> {
+        &self.leaf_keys
     }
 
-    if !last_key.is_ancestor(deepest_last) {
-        let ancestor = deepest_last.finest_common_ancestor(last_key);
-        keys.push(ancestor.children()[NSIBLINGS - 1]);
+    pub fn points(&self) -> &Vec<[f64; 3]> {
+        &self.points
     }
 
-    // Now just iterate over the keys by tuples of two and fill the region between two keys.
-
-    for (&key1, &key2) in keys.iter().tuple_windows() {
-        result.push(key1);
-        result.extend_from_slice(fill_between_two_keys(key1, key2).as_slice());
+    pub fn point_to_level_keys(&self) -> &[Vec<MortonKey>; 1 + DEEPEST_LEVEL as usize] {
+        &self.point_to_level_keys
     }
 
-    // Push the final key
-    result.push(*keys.last().unwrap());
-    // We do not sort the keys. They are already sorted.
-    result
+    pub fn bounding_box(&self) -> &PhysicalBox {
+        &self.bounding_box
+    }
+
+    pub fn number_of_points_in_key(&self, key: MortonKey) -> usize {
+        if let Some(&count) = self.key_counts.get(&key) {
+            count
+        } else {
+            0
+        }
+    }
 }

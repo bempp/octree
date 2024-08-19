@@ -27,6 +27,7 @@ rayon = "1.9"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 bitflags = "2.6.0"
+bytemuck = "1.*"
 coe-rs = "0.1.2"
 
 [dev-dependencies]
