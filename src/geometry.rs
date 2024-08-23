@@ -2,6 +2,8 @@
 
 use bytemuck;
 
+use crate::constants::DEEPEST_LEVEL;
+
 // A bounding box describes geometry in which an Octree lives.
 pub struct PhysicalBox {
     coords: [f64; 6],
@@ -53,19 +55,29 @@ impl PhysicalBox {
         let ydiam = ymax - ymin;
         let zdiam = zmax - zmin;
 
-        // We increase each dimension by
-        // 10^-5 * the diameter of that
-        // dimension.
+        let xmean = xmin + 0.5 * xdiam;
+        let ymean = ymin + 0.5 * ydiam;
+        let zmean = zmin + 0.5 * zdiam;
 
-        xmin -= 0.5 * 1E-5 * xdiam;
-        xmax += 0.5 * 1E-5 * xdiam;
-        ymin -= 0.5 * 1E-5 * ydiam;
-        ymax += 0.5 * 1E-5 * ydiam;
-        zmin -= 0.5 * 1E-5 * zdiam;
-        zmax += 0.5 * 1E-5 * zdiam;
+        // We increase diameters by box size on deepest level
+        // and use the maximum diameter to compute a
+        // cubic bounding box.
+
+        let deepest_box_diam = 1.0 / (1 << DEEPEST_LEVEL) as f64;
+
+        let max_diam = [xdiam, ydiam, zdiam].into_iter().reduce(f64::max).unwrap();
+
+        let max_diam = max_diam * (1.0 + deepest_box_diam);
 
         PhysicalBox {
-            coords: [xmin, ymin, zmin, xmax, ymax, zmax],
+            coords: [
+                xmean - 0.5 * max_diam,
+                ymean - 0.5 * max_diam,
+                zmean - 0.5 * max_diam,
+                xmean + 0.5 * max_diam,
+                ymean + 0.5 * max_diam,
+                zmean + 0.5 * max_diam,
+            ],
         }
     }
 

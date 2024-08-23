@@ -30,7 +30,12 @@ bitflags = "2.6.0"
 bytemuck = "1.*"
 coe-rs = "0.1.2"
 vtkio = "0.6.*"
+mpi = "0.8.*"
+superslice = "1.0.*"
 
+[profile.release]
+debug = 1
+ 
 [dev-dependencies]
 criterion = { version = "0.5.*", features = ["html_reports"]}
 
