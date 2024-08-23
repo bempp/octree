@@ -1,5 +1,5 @@
 //! Testing the hyksort component.
-use bempp_octree::parsort::{get_bin_displacements, get_splitters};
+use bempp_octree::parsort::{get_global_min_max, to_unique_item};
 use mpi;
 use mpi::traits::{Communicator, Root};
 use rand::prelude::*;
@@ -20,16 +20,21 @@ pub fn main() {
         arr.push(n_per_rank * rank + index as u64);
     }
 
-    let splitters = get_splitters(&arr, &world, &mut rng);
+    // let splitters = get_splitters(&arr, &world, &mut rng);
 
-    let bin_displs = get_bin_displacements(&arr, &splitters);
+    // let bin_displs = get_bin_displacements(&arr, &splitters);
 
-    if rank == 4 {
-        println!("Array elements: {:#?}", arr);
+    let arr = to_unique_item(&arr, rank as usize);
 
-        println!("Splitters: {:#?}", splitters);
+    let (min, max) = get_global_min_max(&arr, &world);
 
-        println!("Bin displacements: {:#?}", bin_displs);
+    if rank == 2 {
+        println!("Min: {}", min);
+        println!("Max: {}", max);
+
+        // println!("Splitters: {:#?}", splitters);
+
+        // println!("Bin displacements: {:#?}", bin_displs);
     }
 
     // if rank == 0 {

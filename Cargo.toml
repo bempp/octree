@@ -30,7 +30,7 @@ bitflags = "2.6.0"
 bytemuck = "1.*"
 coe-rs = "0.1.2"
 vtkio = "0.6.*"
-mpi = "0.8.*"
+mpi = {version = "0.8.*", features = ["derive", "user-operations"] }
 superslice = "1.0.*"
 
 [profile.release]
