@@ -14,7 +14,8 @@ use rand::{seq::SliceRandom, Rng};
 const OVERSAMPLING: usize = 8;
 
 // An internal struct. We convert every array element
-// into this struct. The idea is that this is guaranteed to be unique.
+// into this struct. The idea is that this is guaranteed to be unique
+// as it encodes not only the element but also its rank and index.
 
 #[derive(Equivalence, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Default)]
 #[repr(C)]
