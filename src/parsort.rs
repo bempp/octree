@@ -1,14 +1,14 @@
 //! Implementation of a parallel samplesort.
 
 use std::fmt::Display;
-use std::mem::offset_of;
 
-use itertools::{izip, Itertools};
-use mpi::collective::{SystemOperation, UserOperation};
-use mpi::datatype::{Partition, UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
+use itertools::Itertools;
 use mpi::traits::Equivalence;
 use mpi::traits::*;
-use mpi::{datatype::PartitionMut, traits::CommunicatorCollectives};
+use mpi::{
+    datatype::{Partition, PartitionMut},
+    traits::CommunicatorCollectives,
+};
 use rand::{seq::SliceRandom, Rng};
 
 const OVERSAMPLING: usize = 8;
@@ -18,7 +18,7 @@ const OVERSAMPLING: usize = 8;
 
 #[derive(Equivalence, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Default)]
 #[repr(C)]
-pub struct UniqueItem {
+struct UniqueItem {
     pub value: u64,
     pub rank: usize,
     pub index: usize,
@@ -52,77 +52,14 @@ impl UniqueItem {
     }
 }
 
-// unsafe impl Equivalence for UniqueItem {
-//     type Out = UserDatatype;
-
-//     fn equivalent_datatype() -> Self::Out {
-//         UserDatatype::structured::<UncommittedDatatypeRef>(
-//             &[1, 1, 1],
-//             &[
-//                 offset_of!(UniqueItem, value) as isize,
-//                 offset_of!(UniqueItem, rank) as isize,
-//                 offset_of!(UniqueItem, index) as isize,
-//             ],
-//             &[
-//                 u64::equivalent_datatype().into(),
-//                 usize::equivalent_datatype().into(),
-//                 usize::equivalent_datatype().into(),
-//             ],
-//         )
-//     }
-// }
-
-pub fn to_unique_item(arr: &[u64], rank: usize) -> Vec<UniqueItem> {
+fn to_unique_item(arr: &[u64], rank: usize) -> Vec<UniqueItem> {
     arr.iter()
         .enumerate()
         .map(|(index, &item)| UniqueItem::new(item, rank, index))
         .collect()
 }
 
-pub fn get_global_min_max<C>(arr: &[UniqueItem], comm: &C) -> (UniqueItem, UniqueItem)
-where
-    C: CommunicatorCollectives,
-{
-    let (min, max) = if arr.len() > 0 {
-        (*arr.iter().min().unwrap(), *arr.iter().max().unwrap())
-    } else {
-        // Return these choices guarantee that an empty local array
-        // does not interfere in the global min-max calculation.
-        (UniqueItem::MAX, UniqueItem::MIN)
-    };
-
-    // Use an allreduce to get the min and max across all processors
-
-    let mut global_min: UniqueItem = Default::default();
-    let mut global_max: UniqueItem = Default::default();
-    comm.all_reduce_into(
-        &min,
-        &mut global_min,
-        &UserOperation::commutative(|x, y| {
-            let x: &[UniqueItem] = x.downcast().unwrap();
-            let y: &mut [UniqueItem] = y.downcast().unwrap();
-            for (&x_i, y_i) in izip!(x.iter(), y.iter_mut()) {
-                *y_i = x_i.min(*y_i);
-            }
-        }),
-    );
-
-    comm.all_reduce_into(
-        &max,
-        &mut global_max,
-        &UserOperation::commutative(|x, y| {
-            let x: &[UniqueItem] = x.downcast().unwrap();
-            let y: &mut [UniqueItem] = y.downcast().unwrap();
-            for (&x_i, y_i) in izip!(x.iter(), y.iter_mut()) {
-                *y_i = x_i.max(*y_i);
-            }
-        }),
-    );
-
-    (global_min, global_max)
-}
-
-pub fn get_buckets<C, R>(arr: &[UniqueItem], comm: &C, rng: &mut R) -> Vec<UniqueItem>
+fn get_buckets<C, R>(arr: &[UniqueItem], comm: &C, rng: &mut R) -> Vec<UniqueItem>
 where
     C: CommunicatorCollectives,
     R: Rng + ?Sized,
@@ -203,7 +140,7 @@ where
     all_splitters
 }
 
-pub fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
+fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
     // The following array will store the counts for each bucket.
 
     let mut counts = vec![0 as usize; buckets.len() - 1];

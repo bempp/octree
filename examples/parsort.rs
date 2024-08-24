@@ -1,10 +1,8 @@
 //! Testing the hyksort component.
-use bempp_octree::parsort::{
-    self, array_to_root, get_buckets, get_counts, get_global_min_max, parsort, to_unique_item,
-};
+use bempp_octree::parsort::{array_to_root, parsort};
 use itertools::Itertools;
 use mpi;
-use mpi::traits::{Communicator, Root};
+use mpi::traits::Communicator;
 use rand::prelude::*;
 
 pub fn main() {
@@ -35,7 +33,6 @@ pub fn main() {
             assert!(elem1 <= elem2);
         }
         println!("Sorted {} elements.", arr.len());
-
         println!("Finished.");
     }
 }
