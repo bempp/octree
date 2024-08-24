@@ -7,6 +7,7 @@ use itertools::{izip, Itertools};
 use mpi::collective::{SystemOperation, UserOperation};
 use mpi::datatype::{Partition, UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
 use mpi::traits::Equivalence;
+use mpi::traits::*;
 use mpi::{datatype::PartitionMut, traits::CommunicatorCollectives};
 use rand::{seq::SliceRandom, Rng};
 
@@ -227,7 +228,11 @@ pub fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
     let (mut first, mut last) = bucket_iter.next().unwrap();
 
     for elem in arr {
-        if first <= elem && elem < last {
+        // The test after the or sorts out the case that our set includes the maximum possible
+        // item and we are in the last bucket. The biggest item should be counted as belonging
+        // to the bucket.
+        if (first <= elem && elem < last) || (*last == UniqueItem::MAX && *elem == UniqueItem::MAX)
+        {
             // Element is in the right bucket.
             count += 1;
             continue;
@@ -238,7 +243,9 @@ pub fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
             loop {
                 (first, last) = bucket_iter.next().unwrap();
                 current_count = count_iter.next().unwrap();
-                if first <= elem && elem < last {
+                if (first <= elem && elem < last)
+                    || (*last == UniqueItem::MAX && *elem == UniqueItem::MAX)
+                {
                     break;
                 }
             }
@@ -253,12 +260,8 @@ pub fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
 
     *current_count = count;
 
-    // We now fill up all the remaining count elements with zero
-    // as these don't have elements attached.
-
-    while let Some(count_elem) = count_iter.next() {
-        *count_elem = 0;
-    }
+    // We don't need to fill the remaining counts entries with zero
+    // since the array is already initialized with zero.
 
     counts
 }
@@ -374,5 +377,49 @@ impl<'a, T> Iterator for Split<'a, T> {
         let (chunk, rest) = self.slice.split_at(len);
         self.slice = rest;
         Some(chunk)
+    }
+}
+
+pub fn array_to_root<T: Equivalence + Default + Copy + Clone, C: CommunicatorCollectives>(
+    arr: &[T],
+    comm: &C,
+) -> Option<Vec<T>> {
+    let n = arr.len() as i32;
+    let rank = comm.rank();
+    let size = comm.size();
+    let root_process = comm.process_at_rank(0);
+
+    // We first communicate the length of the array to root.
+
+    if rank == 0 {
+        // We are at root.
+
+        let mut ranks = vec![0 as i32; size as usize];
+        root_process.gather_into_root(&n, &mut ranks);
+
+        // We now have all ranks at root. Can now a varcount gather to get
+        // the array elements.
+
+        let nelements = ranks.iter().sum::<i32>();
+
+        let mut new_arr = vec![<T as Default>::default(); nelements as usize];
+
+        let displs: Vec<i32> = ranks
+            .iter()
+            .scan(0, |acc, &x| {
+                let tmp = *acc;
+                *acc += x;
+                Some(tmp)
+            })
+            .collect();
+
+        let mut partition = PartitionMut::new(&mut new_arr[..], ranks, &displs[..]);
+
+        root_process.gather_varcount_into_root(&arr[..], &mut partition);
+        Some(new_arr)
+    } else {
+        root_process.gather_into(&n);
+        root_process.gather_varcount_into(&arr[..]);
+        None
     }
 }
