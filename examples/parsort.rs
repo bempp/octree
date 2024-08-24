@@ -1,5 +1,5 @@
 //! Testing the hyksort component.
-use bempp_octree::parsort::{get_global_min_max, to_unique_item};
+use bempp_octree::parsort::{get_buckets, get_counts, get_global_min_max, to_unique_item};
 use mpi;
 use mpi::traits::{Communicator, Root};
 use rand::prelude::*;
@@ -10,7 +10,7 @@ pub fn main() {
     let rank = world.rank() as u64;
     let size = world.size() as u64;
     let root = world.process_at_rank(0);
-    let n_per_rank = 5;
+    let n_per_rank = 20;
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 
@@ -24,28 +24,22 @@ pub fn main() {
 
     // let bin_displs = get_bin_displacements(&arr, &splitters);
 
-    let arr = to_unique_item(&arr, rank as usize);
+    let mut arr = to_unique_item(&arr, rank as usize);
+    arr.sort_unstable();
 
-    let (min, max) = get_global_min_max(&arr, &world);
+    let buckets = get_buckets(&arr, &world, &mut rng);
+
+    let counts = get_counts(&arr, &buckets);
 
     if rank == 2 {
-        println!("Min: {}", min);
-        println!("Max: {}", max);
+        for (index, item) in buckets.iter().enumerate() {
+            println!("Bucket {}, {}", index, item);
+        }
 
-        // println!("Splitters: {:#?}", splitters);
+        println!("Counts: {:#?}", counts);
 
-        // println!("Bin displacements: {:#?}", bin_displs);
+        for elem in arr {
+            println!("Value: {}", elem.value);
+        }
     }
-
-    // if rank == 0 {
-    //     let mut new_arr = vec![0 as u64; (n_per_rank * size) as usize];
-    //     root.gather_into_root(&arr, &mut new_arr);
-
-    //     // Print all elements on root
-    //     for elem in &new_arr {
-    //         println!("Elem: {}", elem);
-    //     }
-    // } else {
-    //     root.gather_into(&arr);
-    // }
 }

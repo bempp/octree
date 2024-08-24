@@ -5,12 +5,12 @@ use std::mem::offset_of;
 
 use itertools::{izip, Itertools};
 use mpi::collective::{SystemOperation, UserOperation};
-use mpi::datatype::{UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
+use mpi::datatype::{Partition, UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
 use mpi::traits::Equivalence;
 use mpi::{datatype::PartitionMut, traits::CommunicatorCollectives};
 use rand::{seq::SliceRandom, Rng};
 
-const OVERSAMPLING: usize = 2;
+const OVERSAMPLING: usize = 8;
 
 // An internal struct. We convert every array element
 // into this struct. The idea is that this is guaranteed to be unique.
@@ -18,9 +18,9 @@ const OVERSAMPLING: usize = 2;
 #[derive(Equivalence, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Default)]
 #[repr(C)]
 pub struct UniqueItem {
-    value: u64,
-    rank: usize,
-    index: usize,
+    pub value: u64,
+    pub rank: usize,
+    pub index: usize,
 }
 
 impl Display for UniqueItem {
@@ -121,139 +121,258 @@ where
     (global_min, global_max)
 }
 
-// pub fn get_splitters<C, R>(arr: &[u64], comm: &C, rng: &mut R) -> Vec<u64>
-// where
-//     C: CommunicatorCollectives,
-//     R: Rng + ?Sized,
-// {
-//     let size = comm.size() as usize;
+pub fn get_buckets<C, R>(arr: &[UniqueItem], comm: &C, rng: &mut R) -> Vec<UniqueItem>
+where
+    C: CommunicatorCollectives,
+    R: Rng + ?Sized,
+{
+    let size = comm.size() as usize;
 
-//     // In the first step we pick `oversampling * nprocs` splitters.
+    // In the first step we pick `oversampling * nprocs` splitters.
 
-//     let oversampling = if arr.len() < OVERSAMPLING {
-//         arr.len()
-//     } else {
-//         OVERSAMPLING
-//     };
+    let oversampling = if arr.len() < OVERSAMPLING {
+        arr.len()
+    } else {
+        OVERSAMPLING
+    };
 
-//     // We are choosing unique splitters that neither contain
-//     // zero nor u64::max.
+    // We are choosing unique splitters that neither contain
+    // zero nor u64::max.
 
-//     let splitters = arr
-//         .choose_multiple(rng, oversampling)
-//         .unique()
-//         .copied()
-//         .filter(|&elem| elem != 0 && elem != u64::MAX)
-//         .collect::<Vec<_>>();
+    let splitters = arr
+        .choose_multiple(rng, oversampling)
+        .copied()
+        .collect::<Vec<_>>();
 
-//     // We use an all_gatherv so that each process receives all splitters.
-//     // For that we first communicate how many splitters each process has
-//     // and then we send the splitters themselves.
+    // We use an all_gatherv so that each process receives all splitters.
+    // For that we first communicate how many splitters each process has
+    // and then we send the splitters themselves.
 
-//     let nsplitters = splitters.len();
-//     let mut splitters_per_rank = vec![0 as usize; size];
+    let nsplitters = splitters.len();
+    let mut splitters_per_rank = vec![0 as usize; size];
 
-//     comm.all_gather_into(&nsplitters, &mut splitters_per_rank);
+    comm.all_gather_into(&nsplitters, &mut splitters_per_rank);
 
-//     // We now know how many splitters each process has. We now create space
-//     // for the splitters and send them all around.
+    // We now know how many splitters each process has. We now create space
+    // for the splitters and send them all around.
 
-//     let n_all_splitters = splitters_per_rank.iter().sum();
+    let n_all_splitters = splitters_per_rank.iter().sum();
 
-//     let mut all_splitters = vec![0 as u64; n_all_splitters];
-//     let splitters_per_rank = splitters_per_rank.iter().map(|&x| x as i32).collect_vec();
+    let mut all_splitters = vec![Default::default(); n_all_splitters];
+    let splitters_per_rank = splitters_per_rank.iter().map(|&x| x as i32).collect_vec();
 
-//     let displs: Vec<i32> = splitters_per_rank
-//         .iter()
-//         .scan(0, |acc, &x| {
-//             let tmp = *acc;
-//             *acc += x;
-//             Some(tmp)
-//         })
-//         .collect();
+    let displs: Vec<i32> = splitters_per_rank
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp)
+        })
+        .collect();
 
-//     let mut partition = PartitionMut::new(&mut all_splitters[..], splitters_per_rank, &displs[..]);
-//     comm.all_gather_varcount_into(&splitters, &mut partition);
+    let mut partition = PartitionMut::new(&mut all_splitters[..], splitters_per_rank, &displs[..]);
+    comm.all_gather_varcount_into(&splitters, &mut partition);
 
-//     // We now have all splitters available on each process.
-//     // We can now sort the splitters. Every process will then have the same list of sorted splitters.
+    // We now have all splitters available on each process.
+    // We can now sort the splitters. Every process will then have the same list of sorted splitters.
 
-//     all_splitters.sort_unstable();
+    all_splitters.sort_unstable();
 
-//     // We add the global min and the global max if they are not already
-//     // contained.
+    // We now insert the smallest and largest possible element if they are not already
+    // in the splitter collection.
 
-//     all_splitters
-// }
+    if *all_splitters.first().unwrap() != UniqueItem::MIN {
+        all_splitters.insert(0, UniqueItem::MIN)
+    }
 
-// pub fn get_bin_displacements(arr: &[u64], splitters: &[u64]) -> Vec<usize> {
-//     // The following array will store the bin displacements.
-//     // The first bin displacement position is 0. The last bin displacement
-//     // position is the length of the array.
+    if *all_splitters.last().unwrap() != UniqueItem::MAX {
+        all_splitters.push(UniqueItem::MAX);
+    }
 
-//     let mut bin_displs = vec![0 as usize; 2 + splitters.len()];
+    // We now define p buckets (p is number of processors) and we return
+    // a p + 1 element array containing the first element of each bucket
+    // concluded with the largest possible element.
 
-//     // We are iterating through the array. Whenever an element is larger or equal than
-//     // the current splitter we store the current position in `bin_displs` and advance `splitter_iter`
-//     // by 1.
+    all_splitters = split(&all_splitters, size)
+        .map(|slice| slice.first().unwrap())
+        .copied()
+        .collect::<Vec<_>>();
+    all_splitters.push(UniqueItem::MAX);
 
-//     // In the following iterator we skip the first bin displacement position as this must be the default
-//     // zero (start of the bins).
+    all_splitters
+}
 
-//     let mut splitter_iter = izip!(splitters.iter(), bin_displs.iter_mut().skip(1));
+pub fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
+    // The following array will store the counts for each bucket.
 
-//     if let Some((mut splitter, mut bin_entry)) = splitter_iter.next() {
-//         for (index, &arr_item) in arr.iter().enumerate() {
-//             if arr_item >= *splitter {
-//                 *bin_entry = index;
-//                 match splitter_iter.next() {
-//                     Some((next_splitter, next_entry)) => {
-//                         splitter = next_splitter;
-//                         bin_entry = next_entry;
-//                     }
-//                     None => break,
-//                 }
-//             }
-//         }
-//     }
+    let mut counts = vec![0 as usize; buckets.len() - 1];
 
-//     // At the end all unused splitters are assigned as bin position the end
-//     // of the array. This is fine since the MPI all_to_allv is not actually
-//     // accessing and transmitting data for those.
+    // We are iterating through the array. Whenever an element is larger or equal than
+    // the current splitter we store the current position in `bin_displs` and advance `splitter_iter`
+    // by 1.
 
-//     while let Some((_, next_entry)) = splitter_iter.next() {
-//         *next_entry = arr.len();
-//     }
+    // In the following iterator we skip the first bin displacement position as this must be the default
+    // zero (start of the bins).
 
-//     // Don't forget to set the last bin displacement position to length
-//     // of the array.
+    // Note that bucket iterator has as many elements as counts as the tuple_windows has length
+    // 1 smaller than the original array length.
+    let mut bucket_iter = buckets.iter().tuple_windows::<(_, _)>();
 
-//     *bin_displs.last_mut().unwrap() = arr.len();
-//     bin_displs
-// }
+    // We skip the first element as this is always zero.
+    let mut count_iter = counts.iter_mut();
+
+    let mut count: usize = 0;
+    let mut current_count = count_iter.next().unwrap();
+
+    let (mut first, mut last) = bucket_iter.next().unwrap();
+
+    for elem in arr {
+        if first <= elem && elem < last {
+            // Element is in the right bucket.
+            count += 1;
+            continue;
+        } else {
+            // Element is not in the right bucket.
+            // Store counts and find the correct bucket.
+            *current_count = count;
+            loop {
+                (first, last) = bucket_iter.next().unwrap();
+                current_count = count_iter.next().unwrap();
+                if first <= elem && elem < last {
+                    break;
+                }
+            }
+            // Now have the right bucket. Reset count and continue.
+            count = 1;
+        }
+    }
+
+    // Need to store the count for the last bucket in the iterator.
+    // This is always necessary as last iterator is half open interval.
+    // So we don't go into the else part of the for loop.
+
+    *current_count = count;
+
+    // We now fill up all the remaining count elements with zero
+    // as these don't have elements attached.
+
+    while let Some(count_elem) = count_iter.next() {
+        *count_elem = 0;
+    }
+
+    counts
+}
 
 pub fn parsort<C: CommunicatorCollectives, R: Rng + ?Sized>(
-    arr: &mut [u64],
+    arr: &[u64],
     comm: &C,
     rng: &mut R,
-) {
+) -> Vec<u64> {
     let size = comm.size() as usize;
     let rank = comm.rank() as usize;
     // If we only have a single rank simply sort the local array and return
 
+    let mut arr = arr.to_vec();
+
     if size == 1 {
         arr.sort_unstable();
-        return;
+        return arr;
     }
 
-    // let splitters = get_splitters(arr, comm, rng);
+    // We first convert the array into unique elements by adding information
+    // about index and rank. This guarantees that we don't have duplicates in
+    // our sorting set.
 
-    // Each process now has the same splitters. We now sort our local data into the bins
-    // from the splitters.
+    let mut arr = to_unique_item(&arr, rank);
 
-    // To do this simple we sort the local array and then store the bin boundaries.
+    // We now sort the local array.
 
     arr.sort_unstable();
 
-    // let bin_displs = get_bin_displacements(arr, &splitters);
+    // Let us now get the buckets.
+
+    let buckets = get_buckets(&arr, comm, rng);
+
+    // We now compute how many elements of our array go into each bucket.
+
+    let counts = get_counts(&arr, &buckets)
+        .iter()
+        .map(|&elem| elem as i32)
+        .collect::<Vec<_>>();
+
+    // We now do an all_to_allv to communicate the array elements to the right processors.
+
+    // First we need to communicate how many elements everybody gets from each processor.
+
+    let mut counts_from_processor = vec![0 as i32; size];
+
+    comm.all_to_all_into(&counts, &mut counts_from_processor);
+
+    // Each processor now knows how much he gets from all the others.
+
+    // We can now send around the actual elements with an alltoallv.
+    let send_displs: Vec<i32> = counts
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp)
+        })
+        .collect();
+
+    let send_partition = Partition::new(&arr[..], counts, &send_displs[..]);
+
+    let mut recvbuffer =
+        vec![UniqueItem::default(); counts_from_processor.iter().sum::<i32>() as usize];
+
+    let recv_displs: Vec<i32> = counts_from_processor
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp)
+        })
+        .collect();
+
+    let mut receiv_partition =
+        PartitionMut::new(&mut recvbuffer[..], counts_from_processor, &recv_displs[..]);
+    comm.all_to_all_varcount_into(&send_partition, &mut receiv_partition);
+
+    // We now have everything in the receive buffer. Now sort the local elements and return
+
+    recvbuffer.sort_unstable();
+    recvbuffer.iter().map(|&elem| elem.value).collect_vec()
+}
+
+// The following is a simple iterator that splits a slice into n
+// chunks. It is from https://users.rust-lang.org/t/how-to-split-a-slice-into-n-chunks/40008/3
+
+fn split<T>(slice: &[T], n: usize) -> impl Iterator<Item = &[T]> {
+    let len = slice.len() / n;
+    let rem = slice.len() % n;
+    Split { slice, len, rem }
+}
+
+struct Split<'a, T> {
+    slice: &'a [T],
+    len: usize,
+    rem: usize,
+}
+
+impl<'a, T> Iterator for Split<'a, T> {
+    type Item = &'a [T];
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.slice.is_empty() {
+            return None;
+        }
+        let mut len = self.len;
+        if self.rem > 0 {
+            len += 1;
+            self.rem -= 1;
+        }
+        let (chunk, rest) = self.slice.split_at(len);
+        self.slice = rest;
+        Some(chunk)
+    }
 }
