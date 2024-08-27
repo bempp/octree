@@ -1,14 +1,14 @@
 //! Compute an Octree for a medieval battleship
 
-#[cfg(features = "battleship")]
+#[cfg(feature = "battleship")]
 use std::time::Instant;
 
-#[cfg(features = "battleship")]
+#[cfg(feature = "battleship")]
 use bempp_octree::octree::Octree;
-#[cfg(features = "battleship")]
+#[cfg(feature = "battleship")]
 use vtkio::model::*;
 
-#[cfg(features = "battleship")]
+#[cfg(feature = "battleship")]
 pub fn main() {
     let data: &[u8] = include_bytes!("battleship.vtk"); // Or just include_bytes!
 
@@ -37,5 +37,5 @@ pub fn main() {
     }
 }
 
-#[cfg(not(features = "battleship"))]
+#[cfg(not(feature = "battleship"))]
 pub fn main() {}
