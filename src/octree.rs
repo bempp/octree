@@ -11,12 +11,17 @@ use crate::{
     morton::MortonKey,
 };
 
+/// A neighbour
 pub struct Neighbour {
+    /// Direction
     pub direction: [i64; 3],
+    /// Level
     pub level: usize,
+    /// Morton key
     pub key: MortonKey,
 }
 
+/// An octree
 pub struct Octree {
     leaf_keys: Vec<MortonKey>,
     points: Vec<[f64; 3]>,
@@ -28,6 +33,7 @@ pub struct Octree {
 }
 
 impl Octree {
+    /// Create octress from points
     pub fn from_points(points: &[f64], max_level: usize, max_points_per_box: usize) -> Self {
         // Make sure that the points array is a multiple of 3.
         assert_eq!(points.len() % 3, 0);
@@ -150,30 +156,37 @@ impl Octree {
         }
     }
 
+    /// Leaf keys
     pub fn leaf_keys(&self) -> &Vec<MortonKey> {
         &self.leaf_keys
     }
 
+    /// Points
     pub fn points(&self) -> &Vec<[f64; 3]> {
         &self.points
     }
 
+    /// Get level keys for each point
     pub fn point_to_level_keys(&self) -> &[Vec<MortonKey>; NLEVELS] {
         &self.point_to_level_keys
     }
 
+    /// Bounding box
     pub fn bounding_box(&self) -> &PhysicalBox {
         &self.bounding_box
     }
 
+    /// Maximum leaf level
     pub fn maximum_leaf_level(&self) -> usize {
         self.max_leaf_level
     }
 
+    /// Maximum number of points in a leaf box
     pub fn max_points_in_leaf_box(&self) -> usize {
         self.max_points_in_leaf
     }
 
+    /// Number of points in the box indexed by a key
     pub fn number_of_points_in_key(&self, key: MortonKey) -> usize {
         if let Some(&count) = self.key_counts.get(&key) {
             count
@@ -250,21 +263,8 @@ impl Octree {
 
 #[cfg(test)]
 mod test {
-
-    use rand::prelude::*;
-
     use super::Octree;
-
-    fn get_random_points(npoints: usize) -> Vec<f64> {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-
-        let mut points = Vec::<f64>::with_capacity(3 * npoints);
-        for _ in 0..(3 * npoints) {
-            points.push(rng.gen());
-        }
-
-        points
-    }
+    use rand::prelude::*;
 
     fn get_points_on_sphere(npoints: usize) -> Vec<f64> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -287,7 +287,7 @@ mod test {
     }
 
     #[test]
-    pub fn test_octree() {
+    fn test_octree() {
         use std::time::Instant;
 
         let npoints = 1000000;
@@ -306,7 +306,7 @@ mod test {
 
     #[test]
     fn test_export() {
-        let fname = "sphere.vtk";
+        let fname = "_test_sphere.vtk";
         let npoints = 1000000;
         let points = get_points_on_sphere(npoints);
         let max_level = 7;

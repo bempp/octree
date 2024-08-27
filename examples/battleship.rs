@@ -1,10 +1,14 @@
 //! Compute an Octree for a medieval battleship
 
+#[cfg(features = "battleship")]
 use std::time::Instant;
 
+#[cfg(features = "battleship")]
 use bempp_octree::octree::Octree;
+#[cfg(features = "battleship")]
 use vtkio::model::*;
 
+#[cfg(features = "battleship")]
 pub fn main() {
     let data: &[u8] = include_bytes!("battleship.vtk"); // Or just include_bytes!
 
@@ -29,6 +33,9 @@ pub fn main() {
         );
         println!("Maximum level: {}", octree.maximum_leaf_level());
 
-        octree.export_to_vtk("octree.vtk");
+        octree.export_to_vtk("_example_octree.vtk");
     }
 }
+
+#[cfg(not(features = "battleship"))]
+pub fn main() {}

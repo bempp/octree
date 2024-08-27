@@ -7,11 +7,10 @@ use crate::geometry::PhysicalBox;
 use itertools::izip;
 use itertools::Itertools;
 
-// Creating a distinct type for Morton indices
-// to distinguish from u64
-
-// numbers.
-
+/// A morton key
+///
+/// This is a distinct type to distinguish from u64
+/// numbers.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MortonKey {
     value: u64,
@@ -240,10 +239,10 @@ impl MortonKey {
         }
     }
 
-    // Return ancestor of key on specified level
-    //
-    // Return None if level > self.level().
-    // Return the key itself if level == self.level().
+    /// Return ancestor of key on specified level
+    ///
+    /// Return None if level > self.level().
+    /// Return the key itself if level == self.level().
     pub fn ancestor_at_level(&self, level: usize) -> Option<Self> {
         let my_level = self.level();
 

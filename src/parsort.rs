@@ -13,10 +13,9 @@ use rand::{seq::SliceRandom, Rng};
 
 const OVERSAMPLING: usize = 8;
 
-// An internal struct. We convert every array element
-// into this struct. The idea is that this is guaranteed to be unique
-// as it encodes not only the element but also its rank and index.
-
+/// An internal struct. We convert every array element
+/// into this struct. The idea is that this is guaranteed to be unique
+/// as it encodes not only the element but also its rank and index.
 #[derive(Equivalence, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Default)]
 #[repr(C)]
 struct UniqueItem {
@@ -204,6 +203,7 @@ fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
     counts
 }
 
+/// Parallel sort
 pub fn parsort<C: CommunicatorCollectives, R: Rng + ?Sized>(
     arr: &[u64],
     comm: &C,
@@ -318,6 +318,7 @@ impl<'a, T> Iterator for Split<'a, T> {
     }
 }
 
+/// Array to root
 pub fn array_to_root<T: Equivalence + Default + Copy + Clone, C: CommunicatorCollectives>(
     arr: &[T],
     comm: &C,
