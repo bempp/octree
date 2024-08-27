@@ -315,7 +315,7 @@ mod test {
 
         let octree = Octree::from_points(&points, max_level, max_points_per_box);
 
-        octree.export_to_vtk(&fname);
+        octree.export_to_vtk(fname);
         println!("Maximum leaf level: {}", octree.maximum_leaf_level());
         println!(
             "Maximum number of points in leaf box: {}",
