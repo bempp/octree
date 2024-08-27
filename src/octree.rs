@@ -1,15 +1,13 @@
 //! Definition of a linear octree
 
-use std::collections::HashMap;
-use vtkio;
-
-use bytemuck;
-
 use crate::{
     constants::{DEEPEST_LEVEL, NLEVELS},
     geometry::PhysicalBox,
     morton::MortonKey,
 };
+use bytemuck;
+use std::collections::HashMap;
+use vtkio;
 
 /// A neighbour
 pub struct Neighbour {
@@ -82,8 +80,8 @@ impl Octree {
 
         let mut key_counts: HashMap<MortonKey, usize> = Default::default();
 
-        for index in 0..=DEEPEST_LEVEL as usize {
-            for key in &point_to_level_keys[index] {
+        for keys in &point_to_level_keys {
+            for key in keys {
                 *key_counts.entry(*key).or_default() += 1;
             }
         }
@@ -121,7 +119,7 @@ impl Octree {
 
         recurse_keys(
             MortonKey::root(),
-            &mut key_counts,
+            &key_counts,
             &mut leaf_keys,
             max_points_per_box,
             max_level,
@@ -138,7 +136,7 @@ impl Octree {
         for key in &leaf_keys {
             max_leaf_level = max_leaf_level.max(key.level());
             max_points_in_leaf =
-                max_points_in_leaf.max(if let Some(&count) = key_counts.get(&key) {
+                max_points_in_leaf.max(if let Some(&count) = key_counts.get(key) {
                     count
                 } else {
                     0
@@ -197,7 +195,10 @@ impl Octree {
 
     /// Export the tree to vtk
     pub fn export_to_vtk(&self, file_path: &str) {
-        use vtkio::model::*;
+        use vtkio::model::{
+            Attributes, ByteOrder, CellType, Cells, DataSet, IOBuffer, UnstructuredGridPiece,
+            Version, VertexNumbers,
+        };
 
         // Each box has 8 corners with 3 coordinates each, hence 24 floats per key.
         let mut points = Vec::<f64>::new();
@@ -219,7 +220,7 @@ impl Octree {
             if self.number_of_points_in_key(*key) == 0 {
                 continue;
             }
-            let coords = key.physical_box(&bounding_box).corners();
+            let coords = key.physical_box(bounding_box).corners();
 
             key_count += 1;
             offsets.push(8 * key_count);

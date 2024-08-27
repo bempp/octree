@@ -3,8 +3,7 @@
 use std::fmt::Display;
 
 use itertools::Itertools;
-use mpi::traits::Equivalence;
-use mpi::traits::*;
+use mpi::traits::{Equivalence, Root};
 use mpi::{
     datatype::{Partition, PartitionMut},
     traits::CommunicatorCollectives,
@@ -87,7 +86,7 @@ where
     // and then we send the splitters themselves.
 
     let nsplitters = splitters.len();
-    let mut splitters_per_rank = vec![0 as usize; size];
+    let mut splitters_per_rank = vec![0_usize; size];
 
     comm.all_gather_into(&nsplitters, &mut splitters_per_rank);
 
@@ -143,7 +142,7 @@ where
 fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
     // The following array will store the counts for each bucket.
 
-    let mut counts = vec![0 as usize; buckets.len() - 1];
+    let mut counts = vec![0_usize; buckets.len() - 1];
 
     // We are iterating through the array. Whenever an element is larger or equal than
     // the current splitter we store the current position in `bin_displs` and advance `splitter_iter`
@@ -245,7 +244,7 @@ pub fn parsort<C: CommunicatorCollectives, R: Rng + ?Sized>(
 
     // First we need to communicate how many elements everybody gets from each processor.
 
-    let mut counts_from_processor = vec![0 as i32; size];
+    let mut counts_from_processor = vec![0_i32; size];
 
     comm.all_to_all_into(&counts, &mut counts_from_processor);
 
@@ -261,7 +260,7 @@ pub fn parsort<C: CommunicatorCollectives, R: Rng + ?Sized>(
         })
         .collect();
 
-    let send_partition = Partition::new(&arr[..], counts, &send_displs[..]);
+    let send_partition = Partition::new(&arr, counts, &send_displs[..]);
 
     let mut recvbuffer =
         vec![UniqueItem::default(); counts_from_processor.iter().sum::<i32>() as usize];
@@ -333,7 +332,7 @@ pub fn array_to_root<T: Equivalence + Default + Copy + Clone, C: CommunicatorCol
     if rank == 0 {
         // We are at root.
 
-        let mut ranks = vec![0 as i32; size as usize];
+        let mut ranks = vec![0_i32; size as usize];
         root_process.gather_into_root(&n, &mut ranks);
 
         // We now have all ranks at root. Can now a varcount gather to get
@@ -354,11 +353,11 @@ pub fn array_to_root<T: Equivalence + Default + Copy + Clone, C: CommunicatorCol
 
         let mut partition = PartitionMut::new(&mut new_arr[..], ranks, &displs[..]);
 
-        root_process.gather_varcount_into_root(&arr[..], &mut partition);
+        root_process.gather_varcount_into_root(arr, &mut partition);
         Some(new_arr)
     } else {
         root_process.gather_into(&n);
-        root_process.gather_varcount_into(&arr[..]);
+        root_process.gather_varcount_into(arr);
         None
     }
 }
