@@ -1,7 +1,6 @@
 //! Testing the hyksort component.
 use bempp_octree::parsort::{array_to_root, parsort};
 use itertools::Itertools;
-use mpi;
 use mpi::traits::Communicator;
 use rand::prelude::*;
 

@@ -1,22 +1,25 @@
 //! Definition of a linear octree
 
-use std::collections::HashMap;
-use vtkio;
-
-use bytemuck;
-
 use crate::{
     constants::{DEEPEST_LEVEL, NLEVELS},
     geometry::PhysicalBox,
     morton::MortonKey,
 };
+use bytemuck;
+use std::collections::HashMap;
+use vtkio;
 
+/// A neighbour
 pub struct Neighbour {
+    /// Direction
     pub direction: [i64; 3],
+    /// Level
     pub level: usize,
+    /// Morton key
     pub key: MortonKey,
 }
 
+/// An octree
 pub struct Octree {
     leaf_keys: Vec<MortonKey>,
     points: Vec<[f64; 3]>,
@@ -28,6 +31,7 @@ pub struct Octree {
 }
 
 impl Octree {
+    /// Create octress from points
     pub fn from_points(points: &[f64], max_level: usize, max_points_per_box: usize) -> Self {
         // Make sure that the points array is a multiple of 3.
         assert_eq!(points.len() % 3, 0);
@@ -76,8 +80,8 @@ impl Octree {
 
         let mut key_counts: HashMap<MortonKey, usize> = Default::default();
 
-        for index in 0..=DEEPEST_LEVEL as usize {
-            for key in &point_to_level_keys[index] {
+        for keys in &point_to_level_keys {
+            for key in keys {
                 *key_counts.entry(*key).or_default() += 1;
             }
         }
@@ -115,7 +119,7 @@ impl Octree {
 
         recurse_keys(
             MortonKey::root(),
-            &mut key_counts,
+            &key_counts,
             &mut leaf_keys,
             max_points_per_box,
             max_level,
@@ -132,7 +136,7 @@ impl Octree {
         for key in &leaf_keys {
             max_leaf_level = max_leaf_level.max(key.level());
             max_points_in_leaf =
-                max_points_in_leaf.max(if let Some(&count) = key_counts.get(&key) {
+                max_points_in_leaf.max(if let Some(&count) = key_counts.get(key) {
                     count
                 } else {
                     0
@@ -150,30 +154,37 @@ impl Octree {
         }
     }
 
+    /// Leaf keys
     pub fn leaf_keys(&self) -> &Vec<MortonKey> {
         &self.leaf_keys
     }
 
+    /// Points
     pub fn points(&self) -> &Vec<[f64; 3]> {
         &self.points
     }
 
+    /// Get level keys for each point
     pub fn point_to_level_keys(&self) -> &[Vec<MortonKey>; NLEVELS] {
         &self.point_to_level_keys
     }
 
+    /// Bounding box
     pub fn bounding_box(&self) -> &PhysicalBox {
         &self.bounding_box
     }
 
+    /// Maximum leaf level
     pub fn maximum_leaf_level(&self) -> usize {
         self.max_leaf_level
     }
 
+    /// Maximum number of points in a leaf box
     pub fn max_points_in_leaf_box(&self) -> usize {
         self.max_points_in_leaf
     }
 
+    /// Number of points in the box indexed by a key
     pub fn number_of_points_in_key(&self, key: MortonKey) -> usize {
         if let Some(&count) = self.key_counts.get(&key) {
             count
@@ -184,7 +195,10 @@ impl Octree {
 
     /// Export the tree to vtk
     pub fn export_to_vtk(&self, file_path: &str) {
-        use vtkio::model::*;
+        use vtkio::model::{
+            Attributes, ByteOrder, CellType, Cells, DataSet, IOBuffer, UnstructuredGridPiece,
+            Version, VertexNumbers,
+        };
 
         // Each box has 8 corners with 3 coordinates each, hence 24 floats per key.
         let mut points = Vec::<f64>::new();
@@ -206,7 +220,7 @@ impl Octree {
             if self.number_of_points_in_key(*key) == 0 {
                 continue;
             }
-            let coords = key.physical_box(&bounding_box).corners();
+            let coords = key.physical_box(bounding_box).corners();
 
             key_count += 1;
             offsets.push(8 * key_count);
@@ -250,21 +264,8 @@ impl Octree {
 
 #[cfg(test)]
 mod test {
-
-    use rand::prelude::*;
-
     use super::Octree;
-
-    fn get_random_points(npoints: usize) -> Vec<f64> {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-
-        let mut points = Vec::<f64>::with_capacity(3 * npoints);
-        for _ in 0..(3 * npoints) {
-            points.push(rng.gen());
-        }
-
-        points
-    }
+    use rand::prelude::*;
 
     fn get_points_on_sphere(npoints: usize) -> Vec<f64> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
@@ -287,7 +288,7 @@ mod test {
     }
 
     #[test]
-    pub fn test_octree() {
+    fn test_octree() {
         use std::time::Instant;
 
         let npoints = 1000000;
@@ -306,7 +307,7 @@ mod test {
 
     #[test]
     fn test_export() {
-        let fname = "sphere.vtk";
+        let fname = "_test_sphere.vtk";
         let npoints = 1000000;
         let points = get_points_on_sphere(npoints);
         let max_level = 7;
@@ -314,7 +315,7 @@ mod test {
 
         let octree = Octree::from_points(&points, max_level, max_points_per_box);
 
-        octree.export_to_vtk(&fname);
+        octree.export_to_vtk(fname);
         println!("Maximum leaf level: {}", octree.maximum_leaf_level());
         println!(
             "Maximum number of points in leaf box: {}",

@@ -4,7 +4,7 @@ use bytemuck;
 
 use crate::constants::DEEPEST_LEVEL;
 
-// A bounding box describes geometry in which an Octree lives.
+/// A bounding box describes geometry in which an Octree lives.
 pub struct PhysicalBox {
     coords: [f64; 6],
 }
@@ -86,7 +86,7 @@ impl PhysicalBox {
         self.coords
     }
 
-    // Map a point from the reference box [0, 1]^3 to the bounding box.
+    /// Map a point from the reference box [0, 1]^3 to the bounding box.
     pub fn reference_to_physical(&self, point: [f64; 3]) -> [f64; 3] {
         let [xmin, ymin, zmin, xmax, ymax, zmax] = self.coords;
 
@@ -97,7 +97,7 @@ impl PhysicalBox {
         ]
     }
 
-    // Map a point from the physical domain to the reference box.
+    /// Map a point from the physical domain to the reference box.
     pub fn physical_to_reference(&self, point: [f64; 3]) -> [f64; 3] {
         let [xmin, ymin, zmin, xmax, ymax, zmax] = self.coords;
 

@@ -1,17 +1,19 @@
 //! Routines for working with Morton indices.
 
-use std::collections::HashSet;
-
-use crate::constants::*;
+use crate::constants::{
+    BYTE_DISPLACEMENT, BYTE_MASK, DEEPEST_LEVEL, DIRECTIONS, LEVEL_DISPLACEMENT, LEVEL_MASK,
+    LEVEL_SIZE, NINE_BIT_MASK, NSIBLINGS, X_LOOKUP_DECODE, X_LOOKUP_ENCODE, Y_LOOKUP_DECODE,
+    Y_LOOKUP_ENCODE, Z_LOOKUP_DECODE, Z_LOOKUP_ENCODE,
+};
 use crate::geometry::PhysicalBox;
 use itertools::izip;
 use itertools::Itertools;
+use std::collections::HashSet;
 
-// Creating a distinct type for Morton indices
-// to distinguish from u64
-
-// numbers.
-
+/// A morton key
+///
+/// This is a distinct type to distinguish from u64
+/// numbers.
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MortonKey {
     value: u64,
@@ -240,10 +242,10 @@ impl MortonKey {
         }
     }
 
-    // Return ancestor of key on specified level
-    //
-    // Return None if level > self.level().
-    // Return the key itself if level == self.level().
+    /// Return ancestor of key on specified level
+    ///
+    /// Return None if level > self.level().
+    /// Return the key itself if level == self.level().
     pub fn ancestor_at_level(&self, level: usize) -> Option<Self> {
         let my_level = self.level();
 
@@ -283,9 +285,9 @@ impl MortonKey {
         } else {
             // We shift both keys out to 3 * DEEPEST_LEVEL - my_level
             // This gives identical bit sequences if my_key is an ancestor of other_key
-            let my_key = self.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as u64);
+            let my_key = self.value >> (LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as u64));
             let other_key =
-                other.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as u64);
+                other.value >> (LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - my_level as u64));
 
             my_key == other_key
         }
@@ -308,8 +310,9 @@ impl MortonKey {
         // Remove the level information and bring second key to the same level as first key
         // After the following operation the least significant bits are associated with `first_level`.
 
-        let mut first_key = self.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64);
-        let mut second_key = other.value >> LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64);
+        let mut first_key = self.value >> (LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64));
+        let mut second_key =
+            other.value >> (LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level as u64));
 
         // Now move both keys up until they are identical.
         // At the same time we reduce the first level.
@@ -482,16 +485,14 @@ impl MortonKey {
         let mut result = Vec::<MortonKey>::new();
 
         // Special case of empty keys.
-        if keys.len() == 0 {
+        if keys.is_empty() {
             result.push(MortonKey::from_index_and_level([0, 0, 0], 0));
             return result;
         }
 
         // If a single element is given then just return the result if it is the root of the tree.
-        if keys.len() == 1 {
-            if result[0] == MortonKey::from_index_and_level([0, 0, 0], 0) {
-                return result;
-            }
+        if keys.len() == 1 && result[0] == MortonKey::from_index_and_level([0, 0, 0], 0) {
+            return result;
         }
 
         let deepest_first = MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize);
