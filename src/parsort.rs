@@ -1,8 +1,10 @@
 //! Implementation of a parallel samplesort.
 
 use std::fmt::Display;
+use std::mem::offset_of;
 
 use itertools::Itertools;
+use mpi::datatype::{UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
 use mpi::traits::{Equivalence, Root};
 use mpi::{
     datatype::{Partition, PartitionMut},
@@ -12,18 +14,85 @@ use rand::{seq::SliceRandom, Rng};
 
 const OVERSAMPLING: usize = 8;
 
+/// Sortable trait that each type fed into parsort needs to satisfy.
+pub trait ParallelSortable:
+    MinValue
+    + MaxValue
+    + Equivalence
+    + Copy
+    + Clone
+    + Default
+    + PartialEq
+    + Eq
+    + PartialOrd
+    + Ord
+    + Display
+    + Sized
+{
+}
+
+impl<
+        T: MinValue
+            + MaxValue
+            + Equivalence
+            + Copy
+            + Clone
+            + Default
+            + PartialEq
+            + Eq
+            + PartialOrd
+            + Ord
+            + Display
+            + Sized,
+    > ParallelSortable for T
+{
+}
+
 /// An internal struct. We convert every array element
 /// into this struct. The idea is that this is guaranteed to be unique
 /// as it encodes not only the element but also its rank and index.
-#[derive(Equivalence, Eq, PartialEq, PartialOrd, Ord, Copy, Clone, Default)]
-#[repr(C)]
-struct UniqueItem {
-    pub value: u64,
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct UniqueItem<T: ParallelSortable> {
+    pub value: T,
     pub rank: usize,
     pub index: usize,
 }
 
-impl Display for UniqueItem {
+unsafe impl<T: ParallelSortable> Equivalence for UniqueItem<T> {
+    type Out = UserDatatype;
+
+    fn equivalent_datatype() -> Self::Out {
+        UserDatatype::structured::<UncommittedDatatypeRef>(
+            &[1, 1, 1],
+            &[
+                offset_of!(UniqueItem<T>, value) as isize,
+                offset_of!(UniqueItem<T>, rank) as isize,
+                offset_of!(UniqueItem<T>, index) as isize,
+            ],
+            &[
+                UncommittedUserDatatype::contiguous(1, &<T as Equivalence>::equivalent_datatype())
+                    .as_ref(),
+                usize::equivalent_datatype().into(),
+                usize::equivalent_datatype().into(),
+            ]
+            .as_ref(),
+        )
+    }
+}
+
+/// Return the minimum possible value of a type.
+pub trait MinValue {
+    /// Return the min value.
+    fn min_value() -> Self;
+}
+
+/// Return the maximum possible value of a type.
+pub trait MaxValue {
+    /// Return the max value.
+    fn max_value() -> Self;
+}
+
+impl<T: ParallelSortable> Display for UniqueItem<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -33,33 +102,34 @@ impl Display for UniqueItem {
     }
 }
 
-impl UniqueItem {
-    const MIN: UniqueItem = Self {
-        value: 0,
-        rank: 0,
-        index: 0,
-    };
+impl<T: ParallelSortable> MinValue for UniqueItem<T> {
+    fn min_value() -> Self {
+        UniqueItem::new(<T as MinValue>::min_value(), 0, 0)
+    }
+}
 
-    const MAX: UniqueItem = Self {
-        value: u64::MAX,
-        rank: usize::MAX,
-        index: usize::MAX,
-    };
+impl<T: ParallelSortable> MaxValue for UniqueItem<T> {
+    fn max_value() -> Self {
+        UniqueItem::new(<T as MaxValue>::max_value(), 0, 0)
+    }
+}
 
-    pub fn new(value: u64, rank: usize, index: usize) -> Self {
+impl<T: ParallelSortable> UniqueItem<T> {
+    pub fn new(value: T, rank: usize, index: usize) -> Self {
         Self { value, rank, index }
     }
 }
 
-fn to_unique_item(arr: &[u64], rank: usize) -> Vec<UniqueItem> {
+fn to_unique_item<T: ParallelSortable>(arr: &[T], rank: usize) -> Vec<UniqueItem<T>> {
     arr.iter()
         .enumerate()
         .map(|(index, &item)| UniqueItem::new(item, rank, index))
         .collect()
 }
 
-fn get_buckets<C, R>(arr: &[UniqueItem], comm: &C, rng: &mut R) -> Vec<UniqueItem>
+fn get_buckets<T, C, R>(arr: &[UniqueItem<T>], comm: &C, rng: &mut R) -> Vec<UniqueItem<T>>
 where
+    T: ParallelSortable,
     C: CommunicatorCollectives,
     R: Rng + ?Sized,
 {
@@ -118,12 +188,12 @@ where
     // We now insert the smallest and largest possible element if they are not already
     // in the splitter collection.
 
-    if *all_splitters.first().unwrap() != UniqueItem::MIN {
-        all_splitters.insert(0, UniqueItem::MIN)
+    if *all_splitters.first().unwrap() != UniqueItem::min_value() {
+        all_splitters.insert(0, UniqueItem::min_value())
     }
 
-    if *all_splitters.last().unwrap() != UniqueItem::MAX {
-        all_splitters.push(UniqueItem::MAX);
+    if *all_splitters.last().unwrap() != UniqueItem::max_value() {
+        all_splitters.push(UniqueItem::max_value());
     }
 
     // We now define p buckets (p is number of processors) and we return
@@ -134,12 +204,12 @@ where
         .map(|slice| slice.first().unwrap())
         .copied()
         .collect::<Vec<_>>();
-    all_splitters.push(UniqueItem::MAX);
+    all_splitters.push(UniqueItem::max_value());
 
     all_splitters
 }
 
-fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
+fn get_counts<T: ParallelSortable>(arr: &[UniqueItem<T>], buckets: &[UniqueItem<T>]) -> Vec<usize> {
     // The following array will store the counts for each bucket.
 
     let mut counts = vec![0_usize; buckets.len() - 1];
@@ -167,7 +237,8 @@ fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
         // The test after the or sorts out the case that our set includes the maximum possible
         // item and we are in the last bucket. The biggest item should be counted as belonging
         // to the bucket.
-        if (first <= elem && elem < last) || (*last == UniqueItem::MAX && *elem == UniqueItem::MAX)
+        if (first <= elem && elem < last)
+            || (*last == UniqueItem::max_value() && *elem == UniqueItem::max_value())
         {
             // Element is in the right bucket.
             count += 1;
@@ -180,7 +251,7 @@ fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
                 (first, last) = bucket_iter.next().unwrap();
                 current_count = count_iter.next().unwrap();
                 if (first <= elem && elem < last)
-                    || (*last == UniqueItem::MAX && *elem == UniqueItem::MAX)
+                    || (*last == UniqueItem::max_value() && *elem == UniqueItem::max_value())
                 {
                     break;
                 }
@@ -203,11 +274,11 @@ fn get_counts(arr: &[UniqueItem], buckets: &[UniqueItem]) -> Vec<usize> {
 }
 
 /// Parallel sort
-pub fn parsort<C: CommunicatorCollectives, R: Rng + ?Sized>(
-    arr: &[u64],
+pub fn parsort<T: ParallelSortable, C: CommunicatorCollectives, R: Rng + ?Sized>(
+    arr: &[T],
     comm: &C,
     rng: &mut R,
-) -> Vec<u64> {
+) -> Vec<T> {
     let size = comm.size() as usize;
     let rank = comm.rank() as usize;
     // If we only have a single rank simply sort the local array and return
@@ -318,7 +389,7 @@ impl<'a, T> Iterator for Split<'a, T> {
 }
 
 /// Array to root
-pub fn array_to_root<T: Equivalence + Default + Copy + Clone, C: CommunicatorCollectives>(
+pub fn array_to_root<T: ParallelSortable, C: CommunicatorCollectives>(
     arr: &[T],
     comm: &C,
 ) -> Option<Vec<T>> {
@@ -361,3 +432,27 @@ pub fn array_to_root<T: Equivalence + Default + Copy + Clone, C: CommunicatorCol
         None
     }
 }
+
+macro_rules! impl_min_max_value {
+    ($type:ty) => {
+        impl MinValue for $type {
+            fn min_value() -> Self {
+                <$type>::MIN
+            }
+        }
+
+        impl MaxValue for $type {
+            fn max_value() -> Self {
+                <$type>::MAX
+            }
+        }
+    };
+}
+
+impl_min_max_value!(usize);
+impl_min_max_value!(i8);
+impl_min_max_value!(i32);
+impl_min_max_value!(i64);
+impl_min_max_value!(u8);
+impl_min_max_value!(u32);
+impl_min_max_value!(u64);
