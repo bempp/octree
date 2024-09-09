@@ -61,6 +61,12 @@ struct UniqueItem<T: ParallelSortable> {
 unsafe impl<T: ParallelSortable> Equivalence for UniqueItem<T> {
     type Out = UserDatatype;
 
+    // Depending on the MPI implementation the below offset needs
+    // to be an i64 or isize. If it is an i64 Clippy warns about
+    // a useless conversion. But this warning is MPI implementation
+    // dependent. So switch off here.
+
+    #[allow(clippy::useless_conversion)]
     fn equivalent_datatype() -> Self::Out {
         UserDatatype::structured::<UncommittedDatatypeRef>(
             &[1, 1, 1],
