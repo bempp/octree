@@ -65,9 +65,13 @@ unsafe impl<T: ParallelSortable> Equivalence for UniqueItem<T> {
         UserDatatype::structured::<UncommittedDatatypeRef>(
             &[1, 1, 1],
             &[
-                offset_of!(UniqueItem<T>, value) as isize,
-                offset_of!(UniqueItem<T>, rank) as isize,
-                offset_of!(UniqueItem<T>, index) as isize,
+                (offset_of!(UniqueItem<T>, value) as i64)
+                    .try_into()
+                    .unwrap(),
+                (offset_of!(UniqueItem<T>, rank) as i64).try_into().unwrap(),
+                (offset_of!(UniqueItem<T>, index) as i64)
+                    .try_into()
+                    .unwrap(),
             ],
             &[
                 UncommittedUserDatatype::contiguous(1, &<T as Equivalence>::equivalent_datatype())
