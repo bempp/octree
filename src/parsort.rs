@@ -84,8 +84,7 @@ unsafe impl<T: ParallelSortable> Equivalence for UniqueItem<T> {
                     .as_ref(),
                 usize::equivalent_datatype().into(),
                 usize::equivalent_datatype().into(),
-            ]
-            .as_ref(),
+            ],
         )
     }
 }
