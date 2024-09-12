@@ -1,6 +1,6 @@
 //! Testing the hyksort component.
 use bempp_octree::morton::MortonKey;
-use bempp_octree::parallel_octree::{block_partition, linearize, partition};
+use bempp_octree::parallel_octree::{block_partition, is_sorted_array, linearize, partition};
 use bempp_octree::parsort::{array_to_root, parsort};
 use itertools::Itertools;
 use mpi::traits::*;
@@ -89,17 +89,14 @@ pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, co
     let keys = parsort(&keys, comm, rng);
 
     let coarse_tree = block_partition(&keys, rng, comm);
-    if rank == 1 {
-        println!("Length of coarse tree {}", coarse_tree.len());
-    }
 
     let arr = array_to_root(&coarse_tree, comm);
 
     if rank == 0 {
         let arr = arr.unwrap();
-        assert!(MortonKey::is_complete_linear_octree(&arr));
-
         println!("Coarse tree has {} keys", arr.len());
+        assert!(MortonKey::is_complete_linear_octree(&arr));
+        println!("Coarse tree is sorted and complete.");
     }
 }
 

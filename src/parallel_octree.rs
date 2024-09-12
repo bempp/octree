@@ -6,7 +6,7 @@ use crate::{
     constants::{DEEPEST_LEVEL, NSIBLINGS},
     geometry::PhysicalBox,
     morton::MortonKey,
-    parsort::parsort,
+    parsort::{array_to_root, parsort},
 };
 
 use mpi::{
@@ -481,7 +481,7 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
             let deepest_first = MortonKey::deepest_first();
             if !first_key.is_ancestor(deepest_first) {
                 let ancestor = deepest_first.finest_common_ancestor(first_key);
-                linearized_keys.push(ancestor.children()[0]);
+                linearized_keys.insert(0, ancestor.children()[0]);
             }
 
             comm.process_at_rank(1).receive::<MortonKey>()
@@ -505,4 +505,20 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
     }
 
     result
+}
+
+/// Check if an array is sorted.
+pub fn is_sorted_array<C: CommunicatorCollectives>(arr: &[MortonKey], comm: &C) -> Option<bool> {
+    let arr = array_to_root(arr, comm);
+    if comm.rank() == 0 {
+        let arr = arr.unwrap();
+        for (&elem1, &elem2) in arr.iter().tuple_windows() {
+            if elem1 > elem2 {
+                return Some(false);
+            }
+        }
+        Some(true)
+    } else {
+        None
+    }
 }
