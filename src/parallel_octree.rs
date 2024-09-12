@@ -296,9 +296,23 @@ pub fn partition<C: CommunicatorCollectives>(
     let rank = comm.rank();
 
     // First scan the weight.
+    // We scan the local arrays, then use a global scan operation on the last element
+    // of each array to get the global sums and then we update the array of each rank
+    // with the sum from the previous ranks.
 
-    let mut scan: Vec<usize> = vec![0; sorted_keys.len()];
-    comm.scan_into(weights, scan.as_mut_slice(), SystemOperation::sum());
+    let mut scan: Vec<usize> = weights
+        .iter()
+        .scan(0, |state, x| {
+            *state += *x;
+            Some(*state)
+        })
+        .collect_vec();
+    let scan_last = *scan.last().unwrap();
+    let mut scan_result: usize = 0;
+    comm.exclusive_scan_into(&scan_last, &mut scan_result, SystemOperation::sum());
+    for elem in &mut scan {
+        *elem += scan_result;
+    }
 
     let mut total_weight = if rank == size - 1 {
         *scan.last().unwrap()
@@ -323,7 +337,9 @@ pub fn partition<C: CommunicatorCollectives>(
         let q = if p <= k as usize {
             izip!(sorted_keys, &scan)
                 .filter_map(|(&key, &s)| {
-                    if (p - 1) * (1 + w) <= s && s < p * (w + 1) {
+                    if ((p - 1) * (1 + w) <= s && s < p * (w + 1))
+                        || (p == size as usize && (p - 1) * (1 + w) <= s)
+                    {
                         Some(key)
                     } else {
                         None
@@ -333,7 +349,9 @@ pub fn partition<C: CommunicatorCollectives>(
         } else {
             izip!(sorted_keys, &scan)
                 .filter_map(|(&key, &s)| {
-                    if (p - 1) * w + k <= s && s < p * w + k {
+                    if ((p - 1) * w + k <= s && s < p * w + k)
+                        || (p == size as usize && (p - 1) * w + k <= s)
+                    {
                         Some(key)
                     } else {
                         None
@@ -350,6 +368,7 @@ pub fn partition<C: CommunicatorCollectives>(
 
     let mut counts = vec![0 as i32; size as usize];
     let mut counts_from_processor = vec![0 as i32; size as usize];
+
     let mut all_elements = Vec::<MortonKey>::new();
     for (index, c) in counts.iter_mut().enumerate() {
         let elements = hash_map.get(&index).unwrap();
@@ -358,7 +377,6 @@ pub fn partition<C: CommunicatorCollectives>(
     }
 
     // Send around the number of elements for each process
-
     comm.all_to_all_into(&counts, &mut counts_from_processor);
 
     // We have the number of elements for each process now. Now send around

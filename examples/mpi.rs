@@ -17,9 +17,14 @@ pub fn main() {
     let mut arr = Vec::<MortonKey>::new();
     let mut weights = Vec::<usize>::new();
 
-    for index in 0..n_per_rank {
-        arr.push(MortonKey::from_index_and_level([0, 0, 0], 0));
-        weights.push(1);
+    for index in n_per_rank * rank..n_per_rank * (rank + 1) {
+        arr.push(MortonKey::from_index_and_level([index as usize, 0, 0], 10));
+    }
+
+    let arr = parsort(&arr, &world, &mut rng);
+
+    for index in 0..arr.len() {
+        weights.push((rank * n_per_rank) as usize + index);
     }
 
     // let t = n_per_rank * rank as usize;
