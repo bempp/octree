@@ -1,12 +1,12 @@
 //! Parallel Octree structure
 
-use std::{borrow::BorrowMut, collections::HashMap, fmt::Display};
+use std::collections::HashMap;
 
 use crate::{
-    constants::{DEEPEST_LEVEL, NLEVELS},
+    constants::{DEEPEST_LEVEL, NSIBLINGS},
     geometry::PhysicalBox,
     morton::MortonKey,
-    parsort::{parsort, MaxValue, MinValue},
+    parsort::parsort,
 };
 
 use mpi::{
@@ -18,9 +18,7 @@ use mpi::{
 use itertools::{izip, Itertools};
 use mpi::{
     collective::SystemOperation,
-    datatype::UncommittedUserDatatype,
-    topology::Process,
-    traits::{CommunicatorCollectives, Destination, Equivalence},
+    traits::{CommunicatorCollectives, Destination},
 };
 use rand::Rng;
 
@@ -424,4 +422,80 @@ pub fn partition<C: CommunicatorCollectives>(
 
     recvbuffer.sort_unstable();
     recvbuffer
+}
+
+/// Given a distributed set of keys, generate a complete linear Octree.
+pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
+    keys: &[MortonKey],
+    rng: &mut R,
+    comm: &C,
+) -> Vec<MortonKey> {
+    let mut linearized_keys = linearize(keys, rng, comm);
+
+    let size = comm.size();
+    let rank = comm.rank();
+
+    if size == 1 {
+        return MortonKey::complete_region(linearized_keys.as_slice());
+    }
+
+    // Now insert on the first and last process the first and last child of the
+    // finest ancestor of first/last box on deepest level
+
+    // Send first element to previous rank and insert into local keys.
+    // On the first process we also need to insert the first child of the finest
+    // ancestor of the deepest first key and first element. Correspondingly on the last process
+    // we need to insert the last child of the finest ancester of the deepest last key and last element.
+
+    if rank == size - 1 {
+        // On last process send first element to previous processes and insert last
+        // possible box from region into list.
+        comm.process_at_rank(rank - 1)
+            .send(linearized_keys.first().unwrap());
+        let last_key = *linearized_keys.last().unwrap();
+        let deepest_last = MortonKey::deepest_last();
+        if !last_key.is_ancestor(deepest_last) {
+            let ancestor = deepest_last.finest_common_ancestor(last_key);
+            linearized_keys.push(ancestor.children()[NSIBLINGS - 1]);
+        }
+    } else {
+        let (other, _status) = if rank > 0 {
+            // On intermediate process receive from the next process
+            // and send first element to previous process.
+            p2p::send_receive(
+                linearized_keys.first().unwrap(),
+                &comm.process_at_rank(rank - 1),
+                &comm.process_at_rank(rank + 1),
+            )
+        } else {
+            // On first process insert at the beginning the first possible
+            // box in the region and receive the key from next process.
+            let first_key = *linearized_keys.first().unwrap();
+            let deepest_first = MortonKey::deepest_first();
+            if !first_key.is_ancestor(deepest_first) {
+                let ancestor = deepest_first.finest_common_ancestor(first_key);
+                linearized_keys.push(ancestor.children()[0]);
+            }
+
+            comm.process_at_rank(1).receive::<MortonKey>()
+        };
+        // If we are not at the last process we need to introduce the received key
+        // into our list.
+        linearized_keys.push(other);
+    };
+
+    // Now complete the regions defined by the keys on each process.
+
+    let mut result = Vec::<MortonKey>::new();
+
+    for (&key1, &key2) in linearized_keys.iter().tuple_windows() {
+        result.push(key1);
+        result.extend_from_slice(key1.fill_between_keys(key2).as_slice());
+    }
+
+    if rank == size - 1 {
+        result.push(*linearized_keys.last().unwrap());
+    }
+
+    result
 }

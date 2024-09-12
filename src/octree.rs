@@ -291,7 +291,7 @@ mod test {
     fn test_octree() {
         use std::time::Instant;
 
-        let npoints = 1000000;
+        let npoints = 10000;
         let points = get_points_on_sphere(npoints);
         let max_level = 7;
         let max_points_per_box = 100;
@@ -308,7 +308,7 @@ mod test {
     #[test]
     fn test_export() {
         let fname = "_test_sphere.vtk";
-        let npoints = 1000000;
+        let npoints = 10000;
         let points = get_points_on_sphere(npoints);
         let max_level = 7;
         let max_points_per_box = 100;

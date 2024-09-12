@@ -491,6 +491,8 @@ impl MortonKey {
     }
 
     /// Complete a region ensuring that the given keys are part of the leafs.
+    ///
+    /// The given keys must not overlap.
     pub fn complete_region(keys: &[MortonKey]) -> Vec<MortonKey> {
         // First make sure that the input sequence is sorted.
         let mut keys = keys.to_vec();
@@ -509,15 +511,8 @@ impl MortonKey {
             return result;
         }
 
-        let deepest_first = MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize);
-        let deepest_last = MortonKey::from_index_and_level(
-            [
-                LEVEL_SIZE as usize - 1,
-                LEVEL_SIZE as usize - 1,
-                LEVEL_SIZE as usize - 1,
-            ],
-            DEEPEST_LEVEL as usize,
-        );
+        let deepest_first = MortonKey::deepest_first();
+        let deepest_last = MortonKey::deepest_last();
 
         // If the first key is not an ancestor of the deepest possible first element in the
         // tree get the finest ancestor between the two and use the first child of that.
@@ -975,8 +970,6 @@ mod test {
 
         let keys = children[1].fill_between_keys(children[2]);
         assert!(keys.is_empty());
-
-        // Correct result for two keys at deepest level
     }
 
     #[test]
