@@ -490,10 +490,10 @@ impl MortonKey {
         result
     }
 
-    /// Complete a region ensuring that the given keys are part of the leafs.
+    /// Complete a tree ensuring that the given keys are part of the leafs.
     ///
     /// The given keys must not overlap.
-    pub fn complete_region(keys: &[MortonKey]) -> Vec<MortonKey> {
+    pub fn complete_tree(keys: &[MortonKey]) -> Vec<MortonKey> {
         // First make sure that the input sequence is sorted.
         let mut keys = keys.to_vec();
         keys.sort_unstable();
@@ -506,9 +506,9 @@ impl MortonKey {
             return result;
         }
 
-        // If a single element is given then just return the result if it is the root of the tree.
-        if keys.len() == 1 && result[0] == MortonKey::from_index_and_level([0, 0, 0], 0) {
-            return result;
+        // If just the root is given return that.
+        if keys.len() == 1 && *keys.first().unwrap() == MortonKey::root() {
+            return keys.to_vec();
         }
 
         let deepest_first = MortonKey::deepest_first();
@@ -1018,13 +1018,13 @@ mod test {
 
         let keys = [key1, key2, key3];
 
-        let complete_region = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_tree(keys.as_slice());
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
 
         // For an empty slice the complete region method should just add the root of the tree.
         let keys = Vec::<MortonKey>::new();
-        let complete_region = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_tree(keys.as_slice());
         assert_eq!(complete_region.len(), 1);
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
@@ -1033,7 +1033,7 @@ mod test {
 
         let keys = [MortonKey::deepest_first(), MortonKey::deepest_last()];
 
-        let complete_region = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_tree(keys.as_slice());
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
     }

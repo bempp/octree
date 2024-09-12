@@ -1,6 +1,6 @@
 //! Testing the hyksort component.
 use bempp_octree::morton::MortonKey;
-use bempp_octree::parallel_octree::{linearize, partition};
+use bempp_octree::parallel_octree::{block_partition, linearize, partition};
 use bempp_octree::parsort::{array_to_root, parsort};
 use itertools::Itertools;
 use mpi::traits::*;
@@ -19,19 +19,7 @@ pub fn assert_linearized<C: CommunicatorCollectives>(arr: &Vec<MortonKey>, comm:
     }
 }
 
-pub fn main() {
-    let universe = mpi::initialize().unwrap();
-    let world = universe.world();
-    let rank = world.rank() as u64;
-    let max_level = 6;
-
-    // Each process gets its own rng
-    let mut rng = rand::rngs::StdRng::seed_from_u64(rank as u64);
-
-    // We first create a non-uniform tree on rank 0.
-
-    let mut keys = Vec::<MortonKey>::new();
-
+pub fn generate_random_tree<R: Rng>(max_level: usize, rng: &mut R) -> Vec<MortonKey> {
     pub fn add_level<R: Rng>(
         keys: &mut Vec<MortonKey>,
         current: MortonKey,
@@ -56,43 +44,71 @@ pub fn main() {
         }
     }
 
-    add_level(&mut keys, MortonKey::root(), &mut rng, max_level);
+    let mut keys = Vec::<MortonKey>::new();
+    add_level(&mut keys, MortonKey::root(), rng, max_level);
 
-    println!("Number of keys on rank {}: {}", rank, keys.len());
+    keys
+}
+
+pub fn test_linearize<R: Rng, C: CommunicatorCollectives>(rng: &mut R, comm: &C) {
+    let max_level = 6;
+    let keys = generate_random_tree(max_level, rng);
+    let rank = comm.rank();
 
     // We now linearize the keys.
 
     if rank == 0 {
         println!("Linearizing keys.");
     }
-    let sorted_keys = linearize(&keys, &mut rng, &world);
-
-    println!(
-        "Number of linearized keys on rank {}: {}",
-        rank,
-        sorted_keys.len()
-    );
+    let sorted_keys = linearize(&keys, rng, comm);
 
     // Now check that the tree is properly linearized.
 
-    assert_linearized(&sorted_keys, &world);
-
-    // We now partition the keys equally across the processes. We give
-    // each leaf equal weights here.
-
-    let weights = vec![1 as usize; sorted_keys.len()];
-
+    assert_linearized(&sorted_keys, comm);
     if rank == 0 {
-        println!("Partitioning keys.");
+        println!("Linearization successful.");
     }
 
-    let sorted_keys = partition(&sorted_keys, &weights, &world);
+    // Now form the coarse tree
+}
 
-    println!(
-        "After partitioning have {} keys on rank {}",
-        sorted_keys.len(),
-        rank
-    );
+pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, comm: &C) {
+    let max_level = 6;
+    let keys = generate_random_tree(max_level, rng);
+    let rank = comm.rank();
 
-    assert_linearized(&sorted_keys, &world);
+    let arr = array_to_root(&keys, comm);
+
+    if rank == 0 {
+        let arr = arr.unwrap();
+        println!("Fine tree has {} elements", arr.len());
+    }
+
+    // We now linearize the keys.
+
+    let keys = parsort(&keys, comm, rng);
+
+    let coarse_tree = block_partition(&keys, rng, comm);
+    if rank == 1 {
+        println!("Length of coarse tree {}", coarse_tree.len());
+    }
+
+    let arr = array_to_root(&coarse_tree, comm);
+
+    if rank == 0 {
+        let arr = arr.unwrap();
+        assert!(MortonKey::is_complete_linear_octree(&arr));
+
+        println!("Coarse tree has {} keys", arr.len());
+    }
+}
+
+pub fn main() {
+    let universe = mpi::initialize().unwrap();
+    let comm = universe.world();
+    let rank = comm.rank() as u64;
+    // Each process gets its own rng
+    let mut rng = rand::rngs::StdRng::seed_from_u64(rank as u64);
+    test_linearize(&mut rng, &comm);
+    test_coarse_partition(&mut rng, &comm);
 }

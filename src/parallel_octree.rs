@@ -194,17 +194,19 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
     (keys, bounding_box)
 }
 
+/// Block partition of tree
 pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
-    keys: &[MortonKey],
+    sorted_keys: &[MortonKey],
     rng: &mut R,
     comm: &C,
-) {
-    // First we sort the array of weighted keys.
+) -> Vec<MortonKey> {
+    let mut completed_region = sorted_keys
+        .first()
+        .unwrap()
+        .fill_between_keys(*sorted_keys.last().unwrap());
 
-    let sorted_keys = parsort(&keys, comm, rng);
-
-    let mut completed_region =
-        MortonKey::complete_region(&[*sorted_keys.first().unwrap(), *sorted_keys.last().unwrap()]);
+    completed_region.insert(0, *sorted_keys.first().unwrap());
+    completed_region.push(*sorted_keys.last().unwrap());
 
     // Get the smallest level members of the completed region.
 
@@ -216,7 +218,12 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
 
     let largest_boxes = completed_region
         .iter()
-        .filter(|elem| elem.level() == min_level);
+        .filter(|elem| elem.level() == min_level)
+        .copied()
+        .collect_vec();
+
+    let coarse_tree = complete_tree(&largest_boxes, rng, comm);
+    coarse_tree
 }
 
 /// Linearize a set of weighted Morton keys.
@@ -436,7 +443,7 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
     let rank = comm.rank();
 
     if size == 1 {
-        return MortonKey::complete_region(linearized_keys.as_slice());
+        return MortonKey::complete_tree(linearized_keys.as_slice());
     }
 
     // Now insert on the first and last process the first and last child of the
