@@ -227,13 +227,19 @@ pub fn linearize<R: Rng, C: CommunicatorCollectives>(
     rng: &mut R,
     comm: &C,
 ) -> Vec<MortonKey> {
+    let size = comm.size();
+    let rank = comm.rank();
+
+    // If we only have one process we use the standard serial linearization.
+
+    if size == 1 {
+        return MortonKey::linearize(keys);
+    }
+
     // We are first sorting the keys. Then in a linear process across all processors we
     // go through the arrays and delete ancestors of nodes.
 
     let sorted_keys = parsort(&keys, comm, rng);
-
-    let size = comm.size();
-    let rank = comm.rank();
 
     // Each process needs to send its first element to the previous process. Each process
     // then goes through its own list and retains elements that are not ancestors of the
@@ -294,6 +300,12 @@ pub fn partition<C: CommunicatorCollectives>(
 
     let size = comm.size();
     let rank = comm.rank();
+
+    // If we only have one process we simply return.
+
+    if size == 1 {
+        return sorted_keys.to_vec();
+    }
 
     // First scan the weight.
     // We scan the local arrays, then use a global scan operation on the last element
