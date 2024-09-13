@@ -12,7 +12,7 @@ use crate::{
 use mpi::{
     datatype::{Partition, PartitionMut},
     point_to_point as p2p,
-    traits::{Root, Source},
+    traits::{Equivalence, Root, Source},
 };
 
 use itertools::{izip, Itertools};
@@ -200,6 +200,8 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     rng: &mut R,
     comm: &C,
 ) -> Vec<MortonKey> {
+    let rank = comm.rank();
+
     let mut completed_region = sorted_keys
         .first()
         .unwrap()
@@ -216,6 +218,9 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
         .min()
         .unwrap();
 
+    // Each process selects its largest boxes. These are used to create
+    // a coarse tree.
+
     let largest_boxes = completed_region
         .iter()
         .filter(|elem| elem.level() == min_level)
@@ -223,6 +228,82 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
         .collect_vec();
 
     let coarse_tree = complete_tree(&largest_boxes, rng, comm);
+
+    // We want to partition the coarse tree. But we need the correct weights. The idea
+    // is that we use the number of original leafs that intersect with the coarse tree
+    // as leafs. In order to compute this we send the coarse tree around to all processes
+    // so that each process computes for each coarse tree element how many of its keys
+    // intersect with each node of the coarse tree. We then sum up the local weight for each
+    // coarse tree node across all nodes to get the weight.
+
+    let global_coarse_tree = gather_to_all(&coarse_tree, comm);
+
+    // We also want to send around a corresponding array of ranks so that for each global coarse tree key
+    // we have the rank of where it originates from.
+
+    let coarse_tree_ranks = gather_to_all(&vec![rank as usize; coarse_tree.len()], comm);
+
+    // We now compute the local weights.
+    let mut local_weights = vec![0 as usize; global_coarse_tree.len()];
+
+    // In the following loop we want to be a bit smart. We do not iterate through all the local elements.
+    // We know that our keys are sorted and also that the coarse tree keys are sorted. So we find the region
+    // of our sorted keys that overlaps with the coarse tree region.
+
+    // Let's find the start of our region.
+
+    let first_key = *sorted_keys.first().unwrap();
+
+    let first_coarse_index = global_coarse_tree
+        .iter()
+        .take_while(|coarse_key| !coarse_key.is_ancestor(first_key))
+        .count();
+
+    // Now we need to find the end index of our region.
+    let last_key = *sorted_keys.last().unwrap();
+
+    let last_coarse_index = first_coarse_index
+        + global_coarse_tree
+            .iter()
+            .skip(first_coarse_index)
+            .take_while(|coarse_key| coarse_key.is_ancestor(last_key))
+            .count();
+
+    // We now only need to iterate through between the first and last coarse index in the coarse tree.
+
+    for (w, &global_coarse_key) in izip!(
+        local_weights[first_coarse_index..last_coarse_index].iter_mut(),
+        global_coarse_tree[first_coarse_index..last_coarse_index].iter()
+    ) {
+        *w += sorted_keys
+            .iter()
+            .filter(|&&key| global_coarse_key.is_ancestor(key))
+            .count();
+    }
+
+    // We now need to sum up the weights across all processes.
+
+    let mut weights = vec![0 as usize; global_coarse_tree.len()];
+
+    comm.all_reduce_into(&local_weights, &mut weights, SystemOperation::sum());
+
+    // Each process now has all weights. However, we only need the ones for the current process.
+    // So we just filter the rest out.
+
+    let weights = izip!(coarse_tree_ranks, weights)
+        .filter_map(|(r, weight)| {
+            if r == rank as usize {
+                Some(weight)
+            } else {
+                None
+            }
+        })
+        .collect_vec();
+
+    // We have now all the information we need to repartition the coarse tree (finally...). Let's just do it.
+
+    let coarse_tree = partition(&coarse_tree, &weights, comm);
+
     coarse_tree
 }
 
@@ -521,4 +602,52 @@ pub fn is_sorted_array<C: CommunicatorCollectives>(arr: &[MortonKey], comm: &C) 
     } else {
         None
     }
+}
+
+/// Get global size of a distributed array.
+pub fn global_size<T, C: CommunicatorCollectives>(arr: &[T], comm: &C) -> usize {
+    let local_size = arr.len();
+    let mut global_size = 0;
+
+    comm.all_reduce_into(&local_size, &mut global_size, SystemOperation::sum());
+
+    global_size
+}
+
+/// Gather array to all processes
+pub fn gather_to_all<T: Equivalence, C: CommunicatorCollectives>(arr: &[T], comm: &C) -> Vec<T> {
+    // First we need to broadcast the individual sizes on each process.
+
+    let size = comm.size();
+
+    let local_len = arr.len();
+
+    let mut sizes = vec![0 as i32; size as usize];
+
+    comm.all_to_all_into(&local_len, &mut sizes);
+
+    let recv_len = sizes.iter().sum::<i32>() as usize;
+
+    // Now we have the size of each local contribution.
+    // let mut recvbuffer =
+    //     vec![T: Default; counts_from_processor.iter().sum::<i32>() as usize];
+    let mut recvbuffer = Vec::<T>::with_capacity(recv_len);
+    let buf: &mut [T] = unsafe { std::mem::transmute(recvbuffer.spare_capacity_mut()) };
+
+    let recv_displs: Vec<i32> = sizes
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp)
+        })
+        .collect();
+
+    let mut receiv_partition = PartitionMut::new(buf, sizes, &recv_displs[..]);
+
+    comm.all_gather_varcount_into(arr, &mut receiv_partition);
+
+    unsafe { recvbuffer.set_len(recv_len) };
+
+    recvbuffer
 }
