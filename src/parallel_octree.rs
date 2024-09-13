@@ -267,11 +267,10 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     // is an ancestor of our last key.
     let last_key = *sorted_keys.last().unwrap();
 
-    let last_coarse_index = first_coarse_index
-        + global_coarse_tree
-            .iter()
-            .take_while(|coarse_key| !coarse_key.is_ancestor(last_key))
-            .count();
+    let last_coarse_index = global_coarse_tree
+        .iter()
+        .take_while(|coarse_key| !coarse_key.is_ancestor(last_key))
+        .count();
 
     // We now only need to iterate through between the first and last coarse index in the coarse tree.
     // In the way we have computed the indices. The last coarse index is inclusive (it is the ancestor of our last key).
@@ -625,11 +624,11 @@ pub fn gather_to_all<T: Equivalence, C: CommunicatorCollectives>(arr: &[T], comm
 
     let size = comm.size();
 
-    let local_len = arr.len();
+    let local_len = arr.len() as i32;
 
     let mut sizes = vec![0 as i32; size as usize];
 
-    comm.all_to_all_into(&local_len, &mut sizes);
+    comm.all_gather_into(&local_len, &mut sizes);
 
     let recv_len = sizes.iter().sum::<i32>() as usize;
 

@@ -86,9 +86,15 @@ pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, co
 
     // We now linearize the keys.
 
-    let keys = parsort(&keys, comm, rng);
+    let keys = linearize(&keys, rng, comm);
 
     let coarse_tree = block_partition(&keys, rng, comm);
+
+    println!(
+        "Coarse tree on rank {} has {} keys.",
+        rank,
+        coarse_tree.len()
+    );
 
     let arr = array_to_root(&coarse_tree, comm);
 
