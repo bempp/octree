@@ -194,7 +194,10 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
     (keys, bounding_box)
 }
 
-/// Block partition of tree
+/// Block partition of tree.
+///
+/// A necessary condition for the block partitioning is that
+// all sorted keys are on the same level.
 pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     sorted_keys: &[MortonKey],
     rng: &mut R,
@@ -250,7 +253,8 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     // We know that our keys are sorted and also that the coarse tree keys are sorted. So we find the region
     // of our sorted keys that overlaps with the coarse tree region.
 
-    // Let's find the start of our region.
+    // Let's find the start of our region. The start of our region is a coarse key that is an ancestor
+    // of our current key. This works because the coarse tree has levels at most as high as the sorted keys.
 
     let first_key = *sorted_keys.first().unwrap();
 
@@ -259,21 +263,22 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
         .take_while(|coarse_key| !coarse_key.is_ancestor(first_key))
         .count();
 
-    // Now we need to find the end index of our region.
+    // Now we need to find the end index of our region. For this again we find the index of our coarse tree that
+    // is an ancestor of our last key.
     let last_key = *sorted_keys.last().unwrap();
 
     let last_coarse_index = first_coarse_index
         + global_coarse_tree
             .iter()
-            .skip(first_coarse_index)
-            .take_while(|coarse_key| coarse_key.is_ancestor(last_key))
+            .take_while(|coarse_key| !coarse_key.is_ancestor(last_key))
             .count();
 
     // We now only need to iterate through between the first and last coarse index in the coarse tree.
+    // In the way we have computed the indices. The last coarse index is inclusive (it is the ancestor of our last key).
 
     for (w, &global_coarse_key) in izip!(
-        local_weights[first_coarse_index..last_coarse_index].iter_mut(),
-        global_coarse_tree[first_coarse_index..last_coarse_index].iter()
+        local_weights[first_coarse_index..=last_coarse_index].iter_mut(),
+        global_coarse_tree[first_coarse_index..=last_coarse_index].iter()
     ) {
         *w += sorted_keys
             .iter()
