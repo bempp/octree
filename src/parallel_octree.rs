@@ -386,6 +386,10 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
             }
         }
     }
+
+    // We have now the necessary rank for each key element.
+    // We do a stable sort of the sorted_keys to sort them by rank
+
     sorted_keys.to_vec()
 }
 
