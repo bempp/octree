@@ -22,7 +22,7 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 itertools = "0.13.*"
-rand = "0.8.5"
+rand = { version = "0.8.5", features = ["alloc"] }
 bytemuck = "1.*"
 vtkio = "0.6.*"
 mpi = {version = "0.8.*", features = ["derive", "user-operations"] }

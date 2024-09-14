@@ -48,6 +48,13 @@ impl MortonKey {
         key
     }
 
+    /// A key that is not valid or well formed but guaranteed to be larger than any valid key.
+    ///
+    /// This is useful when a guaranteed upper bound is needed.
+    pub fn upper_bound() -> Self {
+        Self { value: u64::MAX }
+    }
+
     /// Check if a key is invalid.
     pub fn invalid_key() -> Self {
         Self { value: 1 << 63 }

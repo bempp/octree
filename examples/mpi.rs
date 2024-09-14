@@ -1,8 +1,9 @@
 //! Testing the hyksort component.
+use bempp_octree::constants::{DEEPEST_LEVEL, LEVEL_SIZE};
 use bempp_octree::morton::MortonKey;
 use bempp_octree::parallel_octree::{block_partition, is_sorted_array, linearize, partition};
 use bempp_octree::parsort::{array_to_root, parsort};
-use itertools::Itertools;
+use itertools::{izip, Itertools};
 use mpi::traits::*;
 use rand::prelude::*;
 
@@ -17,6 +18,23 @@ pub fn assert_linearized<C: CommunicatorCollectives>(arr: &Vec<MortonKey>, comm:
         }
         println!("{} keys are linearized.", &arr.len());
     }
+}
+
+pub fn generate_random_keys<R: Rng>(nkeys: usize, rng: &mut R) -> Vec<MortonKey> {
+    let mut result = Vec::<MortonKey>::with_capacity(nkeys);
+
+    let xindices = rand::seq::index::sample(rng, LEVEL_SIZE as usize, nkeys);
+    let yindices = rand::seq::index::sample(rng, LEVEL_SIZE as usize, nkeys);
+    let zindices = rand::seq::index::sample(rng, LEVEL_SIZE as usize, nkeys);
+
+    for (xval, yval, zval) in izip!(xindices.iter(), yindices.iter(), zindices.iter()) {
+        result.push(MortonKey::from_index_and_level(
+            [xval, yval, zval],
+            DEEPEST_LEVEL as usize,
+        ));
+    }
+
+    result
 }
 
 pub fn generate_random_tree<R: Rng>(max_level: usize, rng: &mut R) -> Vec<MortonKey> {
@@ -73,20 +91,13 @@ pub fn test_linearize<R: Rng, C: CommunicatorCollectives>(rng: &mut R, comm: &C)
 }
 
 pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, comm: &C) {
-    let max_level = 6;
-    let keys = generate_random_tree(max_level, rng);
+    let keys = generate_random_keys(10000, rng);
     let rank = comm.rank();
-
-    let arr = array_to_root(&keys, comm);
-
-    if rank == 0 {
-        let arr = arr.unwrap();
-        println!("Fine tree has {} elements", arr.len());
-    }
 
     // We now linearize the keys.
 
     let keys = linearize(&keys, rng, comm);
+    println!("There are {} keys on rank {}", keys.len(), rank);
 
     let coarse_tree = block_partition(&keys, rng, comm);
 
@@ -102,7 +113,7 @@ pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, co
         let arr = arr.unwrap();
         println!("Coarse tree has {} keys", arr.len());
         assert!(MortonKey::is_complete_linear_octree(&arr));
-        println!("Coarse tree is sorted and complete.");
+        println!("Coarse tree is sorted, linear and complete.");
     }
 }
 

@@ -304,11 +304,89 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
         })
         .collect_vec();
 
-    // We have now all the information we need to repartition the coarse tree (finally...). Let's just do it.
-
     let coarse_tree = partition(&coarse_tree, &weights, comm);
 
     coarse_tree
+
+    // We now need to redistribute the global tree according to the coarse tree.
+}
+
+pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
+    sorted_keys: &[MortonKey],
+    coarse_tree: &[MortonKey],
+    comm: &C,
+) -> Vec<MortonKey> {
+    let rank = comm.rank();
+    let size = comm.size();
+
+    if size == 1 {
+        return sorted_keys.to_vec();
+    }
+
+    // We want to globally redistribute keys so that the keys on each process are descendents
+    // of the local coarse tree keys.
+
+    // We are using here the fact that the coarse tree is complete and sorted.
+    // We are sending around to each process the first local index. This
+    // defines bins in which we sort our keys. The keys are then sent around to the correct
+    // processes via an alltoallv operation.
+
+    let my_first = *coarse_tree.first().unwrap();
+
+    let mut global_bins = Vec::<MortonKey>::with_capacity(size as usize);
+    let global_bins_buff: &mut [MortonKey] =
+        unsafe { std::mem::transmute(global_bins.spare_capacity_mut()) };
+
+    comm.all_gather_into(&my_first, global_bins_buff);
+
+    unsafe { global_bins.set_len(size as usize) };
+
+    // // We now have the first index from each process. We also want the last index from the last
+    // // process everywhere to make sorting into bins easier.
+
+    // let mut last_coarse_key = MortonKey::default();
+
+    // if rank == size - 1 {
+    //     last_coarse_key = *coarse_tree.last().unwrap();
+    // }
+
+    // comm.process_at_rank(size - 1)
+    //     .broadcast_into(&mut last_coarse_key);
+
+    global_bins.push(MortonKey::upper_bound());
+    let mut ranks = vec![0 as usize; size as usize];
+
+    // We now have our bins. We go through our keys and assign to each key the
+    // rank it should be sent to. For this we are using the fact that both our
+    // keys and the coarse tree are sorted.
+
+    // This iterates over each possible bin and returns also the associated rank.
+    let mut bin_iter = global_bins
+        .iter()
+        .tuple_windows::<(&MortonKey, &MortonKey)>()
+        .enumerate();
+
+    // We take the first element of the bin iterator. There will always be at least one.
+    let (mut rank, (mut bin_start, mut bin_end)) = bin_iter.next().unwrap();
+
+    for (&key, r) in izip!(sorted_keys.iter(), ranks.iter_mut()) {
+        if *bin_start <= key && key < *bin_end {
+            *r = rank
+        } else {
+            // Move the bin forward until it fits. There will always be a fitting bin.
+            while let Some((rn, (bsn, ben))) = bin_iter.next() {
+                if *bsn <= key && key < *ben {
+                    *r = rn;
+                    rank = rn;
+                    bin_start = bsn;
+                    bin_end = ben;
+                } else {
+                    continue;
+                }
+            }
+        }
+    }
+    sorted_keys.to_vec()
 }
 
 /// Linearize a set of weighted Morton keys.
