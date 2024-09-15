@@ -204,6 +204,10 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     comm: &C,
 ) -> Vec<MortonKey> {
     let rank = comm.rank();
+    if comm.size() == 1 {
+        // On a single node block partitioning should not do anything.
+        return sorted_keys.to_vec();
+    }
 
     let mut completed_region = sorted_keys
         .first()
@@ -306,18 +310,19 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
 
     let coarse_tree = partition(&coarse_tree, &weights, comm);
 
-    coarse_tree
+    redistribute_with_respect_to_coarse_tree(&sorted_keys, &coarse_tree, comm)
 
     // We now need to redistribute the global tree according to the coarse tree.
 }
 
+/// Redistribute sorted keys with respect to a linear coarse tree.
 pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     sorted_keys: &[MortonKey],
     coarse_tree: &[MortonKey],
     comm: &C,
 ) -> Vec<MortonKey> {
-    let rank = comm.rank();
     let size = comm.size();
+    let rank = comm.rank();
 
     if size == 1 {
         return sorted_keys.to_vec();
@@ -354,43 +359,80 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     //     .broadcast_into(&mut last_coarse_key);
 
     global_bins.push(MortonKey::upper_bound());
-    let mut ranks = vec![0 as usize; size as usize];
 
-    // We now have our bins. We go through our keys and assign to each key the
-    // rank it should be sent to. For this we are using the fact that both our
-    // keys and the coarse tree are sorted.
+    // We now have our bins. We go through our keys and store how
+    // many keys are assigned to each rank. We are using here that
+    // our keys and the coarse tree are both sorted.
+
+    // This will store for each rank how many keys will be assigned to it.
+    let mut rank_counts = vec![0 as i32; size as usize];
 
     // This iterates over each possible bin and returns also the associated rank.
-    let mut bin_iter = global_bins
-        .iter()
-        .tuple_windows::<(&MortonKey, &MortonKey)>()
-        .enumerate();
+    let mut bin_iter = izip!(
+        rank_counts.iter_mut(),
+        global_bins
+            .iter()
+            .tuple_windows::<(&MortonKey, &MortonKey)>(),
+    );
 
     // We take the first element of the bin iterator. There will always be at least one.
-    let (mut rank, (mut bin_start, mut bin_end)) = bin_iter.next().unwrap();
+    let mut r: &mut i32;
+    let mut bin_start: &MortonKey;
+    let mut bin_end: &MortonKey;
+    (r, (bin_start, bin_end)) = bin_iter.next().unwrap();
 
-    for (&key, r) in izip!(sorted_keys.iter(), ranks.iter_mut()) {
+    for &key in sorted_keys.iter() {
         if *bin_start <= key && key < *bin_end {
-            *r = rank
+            *r += 1;
         } else {
             // Move the bin forward until it fits. There will always be a fitting bin.
             while let Some((rn, (bsn, ben))) = bin_iter.next() {
                 if *bsn <= key && key < *ben {
-                    *r = rn;
-                    rank = rn;
+                    *rn += 1;
+                    r = rn;
                     bin_start = bsn;
                     bin_end = ben;
-                } else {
-                    continue;
+                    break;
                 }
             }
         }
     }
 
-    // We have now the necessary rank for each key element.
-    // We do a stable sort of the sorted_keys to sort them by rank
+    // We now have the counts for each rank. Let's send it around via alltoallv.
 
-    sorted_keys.to_vec()
+    let mut counts_from_proc = vec![0 as i32; size as usize];
+
+    comm.all_to_all_into(&rank_counts, &mut counts_from_proc);
+    // Now compute the send and receive displacements.
+
+    // We can now send around the actual elements with an alltoallv.
+    let send_displs: Vec<i32> = rank_counts
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp as i32)
+        })
+        .collect();
+
+    let send_partition = Partition::new(&sorted_keys[..], &rank_counts[..], &send_displs[..]);
+
+    let mut recvbuffer = vec![MortonKey::default(); counts_from_proc.iter().sum::<i32>() as usize];
+
+    let recv_displs: Vec<i32> = counts_from_proc
+        .iter()
+        .scan(0, |acc, &x| {
+            let tmp = *acc;
+            *acc += x;
+            Some(tmp)
+        })
+        .collect();
+
+    let mut receiv_partition =
+        PartitionMut::new(&mut recvbuffer[..], counts_from_proc, &recv_displs[..]);
+    comm.all_to_all_varcount_into(&send_partition, &mut receiv_partition);
+
+    recvbuffer
 }
 
 /// Linearize a set of weighted Morton keys.

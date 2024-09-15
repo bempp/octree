@@ -91,29 +91,53 @@ pub fn test_linearize<R: Rng, C: CommunicatorCollectives>(rng: &mut R, comm: &C)
 }
 
 pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, comm: &C) {
-    let keys = generate_random_keys(10000, rng);
     let rank = comm.rank();
+    let keys = if rank == 0 {
+        generate_random_keys(50, rng)
+    } else {
+        generate_random_keys(1000, rng)
+    };
 
     // We now linearize the keys.
 
-    let keys = linearize(&keys, rng, comm);
-    println!("There are {} keys on rank {}", keys.len(), rank);
+    let mut keys = linearize(&keys, rng, comm);
 
-    let coarse_tree = block_partition(&keys, rng, comm);
+    // We move most keys over from rank 0 to rank 2 to check how the partitioning works.
+
+    let nsend = 400;
+    // Send the last 200 keys from rank 0 to rank 1.
+
+    if rank == 0 {
+        let send_keys = &keys[keys.len() - nsend..keys.len()];
+        comm.process_at_rank(1).send(send_keys);
+        keys = keys[0..keys.len() - nsend].to_vec();
+    }
+
+    if rank == 1 {
+        let mut recv_keys = vec![MortonKey::default(); nsend];
+        comm.process_at_rank(0).receive_into(&mut recv_keys);
+        recv_keys.extend(keys.iter());
+        keys = recv_keys;
+    }
+
+    println!("Rank {} has {} keys. ", rank, keys.len());
+
+    let partitioned_tree = block_partition(&keys, rng, comm);
 
     println!(
-        "Coarse tree on rank {} has {} keys.",
+        "Partitioned tree on rank {} has {} keys.",
         rank,
-        coarse_tree.len()
+        partitioned_tree.len()
     );
 
-    let arr = array_to_root(&coarse_tree, comm);
+    let arr = array_to_root(&partitioned_tree, comm);
 
     if rank == 0 {
         let arr = arr.unwrap();
-        println!("Coarse tree has {} keys", arr.len());
-        assert!(MortonKey::is_complete_linear_octree(&arr));
-        println!("Coarse tree is sorted, linear and complete.");
+        for (elem1, elem2) in arr.iter().tuple_windows() {
+            assert!(*elem1 <= *elem2);
+        }
+        println!("Keys are sorted.");
     }
 }
 
