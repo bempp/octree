@@ -196,17 +196,19 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
 
 /// Block partition of tree.
 ///
+/// Returns a tuple `(partitioned_keys, coarse_keys)` of the partitioned
+/// keys and the associated coarse keys.
 /// A necessary condition for the block partitioning is that
 // all sorted keys are on the same level.
 pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     sorted_keys: &[MortonKey],
     rng: &mut R,
     comm: &C,
-) -> Vec<MortonKey> {
+) -> (Vec<MortonKey>, Vec<MortonKey>) {
     let rank = comm.rank();
     if comm.size() == 1 {
         // On a single node block partitioning should not do anything.
-        return sorted_keys.to_vec();
+        return (sorted_keys.to_vec(), vec![MortonKey::root()]);
     }
 
     let mut completed_region = sorted_keys
@@ -310,7 +312,10 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
 
     let coarse_tree = partition(&coarse_tree, &weights, comm);
 
-    redistribute_with_respect_to_coarse_tree(&sorted_keys, &coarse_tree, comm)
+    (
+        redistribute_with_respect_to_coarse_tree(&sorted_keys, &coarse_tree, comm),
+        coarse_tree,
+    )
 
     // We now need to redistribute the global tree according to the coarse tree.
 }
@@ -322,7 +327,6 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     comm: &C,
 ) -> Vec<MortonKey> {
     let size = comm.size();
-    let rank = comm.rank();
 
     if size == 1 {
         return sorted_keys.to_vec();
@@ -346,18 +350,9 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 
     unsafe { global_bins.set_len(size as usize) };
 
-    // // We now have the first index from each process. We also want the last index from the last
-    // // process everywhere to make sorting into bins easier.
-
-    // let mut last_coarse_key = MortonKey::default();
-
-    // if rank == size - 1 {
-    //     last_coarse_key = *coarse_tree.last().unwrap();
-    // }
-
-    // comm.process_at_rank(size - 1)
-    //     .broadcast_into(&mut last_coarse_key);
-
+    // We now have the first index from each process. We also want
+    // an upper bound for the last index of the tree to make the sorting into
+    // bins easier.
     global_bins.push(MortonKey::upper_bound());
 
     // We now have our bins. We go through our keys and store how
@@ -365,38 +360,11 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     // our keys and the coarse tree are both sorted.
 
     // This will store for each rank how many keys will be assigned to it.
-    let mut rank_counts = vec![0 as i32; size as usize];
 
-    // This iterates over each possible bin and returns also the associated rank.
-    let mut bin_iter = izip!(
-        rank_counts.iter_mut(),
-        global_bins
-            .iter()
-            .tuple_windows::<(&MortonKey, &MortonKey)>(),
-    );
-
-    // We take the first element of the bin iterator. There will always be at least one.
-    let mut r: &mut i32;
-    let mut bin_start: &MortonKey;
-    let mut bin_end: &MortonKey;
-    (r, (bin_start, bin_end)) = bin_iter.next().unwrap();
-
-    for &key in sorted_keys.iter() {
-        if *bin_start <= key && key < *bin_end {
-            *r += 1;
-        } else {
-            // Move the bin forward until it fits. There will always be a fitting bin.
-            while let Some((rn, (bsn, ben))) = bin_iter.next() {
-                if *bsn <= key && key < *ben {
-                    *rn += 1;
-                    r = rn;
-                    bin_start = bsn;
-                    bin_end = ben;
-                    break;
-                }
-            }
-        }
-    }
+    let rank_counts = sort_to_bins(sorted_keys, &global_bins)
+        .iter()
+        .map(|&elem| elem as i32)
+        .collect_vec();
 
     // We now have the counts for each rank. Let's send it around via alltoallv.
 
@@ -433,6 +401,93 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     comm.all_to_all_varcount_into(&send_partition, &mut receiv_partition);
 
     recvbuffer
+}
+
+/// Create bins from sorted keys.
+pub fn sort_to_bins(sorted_keys: &[MortonKey], bins: &[MortonKey]) -> Vec<usize> {
+    let mut bin_counts = vec![0 as usize; bins.len() - 1];
+
+    // This iterates over each possible bin and returns also the associated rank.
+    let mut bin_iter = izip!(
+        bin_counts.iter_mut(),
+        bins.iter().tuple_windows::<(&MortonKey, &MortonKey)>(),
+    );
+
+    // We take the first element of the bin iterator. There will always be at least one.
+    let mut r: &mut usize;
+    let mut bin_start: &MortonKey;
+    let mut bin_end: &MortonKey;
+    (r, (bin_start, bin_end)) = bin_iter.next().unwrap();
+
+    for &key in sorted_keys.iter() {
+        if *bin_start <= key && key < *bin_end {
+            *r += 1;
+        } else {
+            // Move the bin forward until it fits. There will always be a fitting bin.
+            while let Some((rn, (bsn, ben))) = bin_iter.next() {
+                if *bsn <= key && key < *ben {
+                    *rn += 1;
+                    r = rn;
+                    bin_start = bsn;
+                    bin_end = ben;
+                    break;
+                }
+            }
+        }
+    }
+
+    bin_counts
+}
+
+/// Return a complete tree generated from local keys and associated coarse keys.
+///
+/// The coarse keys are refined until the maximum level is reached or until each coarse key
+/// is the ancestor of at most `max_keys` fine keys.
+pub fn create_local_tree(
+    sorted_fine_keys: &[MortonKey],
+    coarse_keys: &[MortonKey],
+    mut max_level: usize,
+    max_keys: usize,
+) -> Vec<MortonKey> {
+    if max_level > DEEPEST_LEVEL as usize {
+        max_level = DEEPEST_LEVEL as usize;
+    }
+
+    // We split the sorted fine keys into subslices so that each subslice
+    // is associated with a coarse slice. For this we need to add an upper bound
+    // coarse keys to ensure that we have suitable bins.
+
+    let mut bins = coarse_keys.to_vec();
+    bins.push(MortonKey::upper_bound());
+
+    let counts = sort_to_bins(&sorted_fine_keys, &bins);
+
+    // We now know how many fine keys are associated with each coarse block. We iterate
+    // through and locally refine for each block that requires it.
+
+    let mut remainder = sorted_fine_keys;
+    let mut new_coarse_keys = Vec::<MortonKey>::new();
+
+    for (&count, &coarse_key) in izip!(counts.iter(), coarse_keys.iter()) {
+        let current;
+        (current, remainder) = remainder.split_at(count);
+        if coarse_key.level() < max_level && current.len() > max_keys {
+            // We need to refine the current split.
+            new_coarse_keys.extend_from_slice(
+                create_local_tree(
+                    current,
+                    coarse_key.children().as_slice(),
+                    max_level,
+                    max_keys,
+                )
+                .as_slice(),
+            );
+        } else {
+            new_coarse_keys.push(coarse_key)
+        }
+    }
+
+    coarse_keys.to_vec()
 }
 
 /// Linearize a set of weighted Morton keys.

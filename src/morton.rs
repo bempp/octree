@@ -662,13 +662,7 @@ impl MortonKey {
                     );
                 }
             }
-            new_work_list.extend_from_slice(
-                keys.iter()
-                    .copied()
-                    .filter(|&key| key.level() == level - 1)
-                    .collect_vec()
-                    .as_slice(),
-            );
+            new_work_list.extend(keys.iter().copied().filter(|&key| key.level() == level - 1));
 
             work_list = new_work_list;
             // Now extend the work list with the

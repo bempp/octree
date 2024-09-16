@@ -127,10 +127,10 @@ pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, co
     println!(
         "Partitioned tree on rank {} has {} keys.",
         rank,
-        partitioned_tree.len()
+        partitioned_tree.0.len()
     );
 
-    let arr = array_to_root(&partitioned_tree, comm);
+    let arr = array_to_root(&partitioned_tree.0, comm);
 
     if rank == 0 {
         let arr = arr.unwrap();
