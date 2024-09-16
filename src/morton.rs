@@ -430,6 +430,42 @@ impl MortonKey {
         result
     }
 
+    /// Return the index of the key as a child of the parent, i.e. 0, 1, ..., 7.
+    #[inline(always)]
+    pub fn child_index(&self) -> usize {
+        if *self == MortonKey::root() {
+            return 0;
+        }
+        let level = self.level() as u64;
+
+        let shift = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level);
+
+        ((self.value >> shift) % 8) as usize
+    }
+
+    /// Return the finest descendent that is opposite to the joint corner with the siblings.
+    pub fn finest_outer_descendent(&self) -> MortonKey {
+        // First find out which child the current key is.
+
+        let level = self.level() as u64;
+
+        if level == DEEPEST_LEVEL {
+            return *self;
+        }
+
+        let mut child_level = 1 + level;
+        let mut key = *self;
+        let outer_index = self.child_index() as u64;
+
+        while child_level <= DEEPEST_LEVEL {
+            let shift = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - child_level);
+            key = MortonKey::new(1 + (key.value | outer_index << shift));
+            child_level += 1;
+        }
+
+        key
+    }
+
     /// Linearize by sorting and removing overlaps.
     pub fn linearize(keys: &[MortonKey]) -> Vec<MortonKey> {
         let mut new_keys = Vec::<MortonKey>::new();
@@ -1244,5 +1280,39 @@ mod test {
         assert!(coords[2] <= point[2] && point[2] < coords[5]);
 
         // Now compute the box.
+    }
+
+    #[test]
+    pub fn test_child_index() {
+        let key = MortonKey::from_index_and_level([1, 501, 718], 10);
+
+        let children = key.children();
+
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(index, child.child_index());
+        }
+    }
+
+    #[test]
+    pub fn test_finest_outer_descendent() {
+        let key = MortonKey::from_index_and_level([0, 0, 0], 1);
+
+        let finest_outer_descendent = key.finest_outer_descendent();
+
+        assert_eq!(
+            finest_outer_descendent,
+            MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize)
+        );
+
+        let key = MortonKey::from_index_and_level([1, 1, 0], 1);
+        let finest_outer_descendent = key.finest_outer_descendent();
+
+        assert_eq!(
+            finest_outer_descendent,
+            MortonKey::from_index_and_level(
+                [LEVEL_SIZE as usize - 1, LEVEL_SIZE as usize - 1, 0],
+                DEEPEST_LEVEL as usize
+            )
+        );
     }
 }
