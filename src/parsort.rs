@@ -397,51 +397,6 @@ impl<'a, T> Iterator for Split<'a, T> {
     }
 }
 
-/// Array to root
-pub fn array_to_root<T: ParallelSortable, C: CommunicatorCollectives>(
-    arr: &[T],
-    comm: &C,
-) -> Option<Vec<T>> {
-    let n = arr.len() as i32;
-    let rank = comm.rank();
-    let size = comm.size();
-    let root_process = comm.process_at_rank(0);
-
-    // We first communicate the length of the array to root.
-
-    if rank == 0 {
-        // We are at root.
-
-        let mut ranks = vec![0_i32; size as usize];
-        root_process.gather_into_root(&n, &mut ranks);
-
-        // We now have all ranks at root. Can now a varcount gather to get
-        // the array elements.
-
-        let nelements = ranks.iter().sum::<i32>();
-
-        let mut new_arr = vec![<T as Default>::default(); nelements as usize];
-
-        let displs: Vec<i32> = ranks
-            .iter()
-            .scan(0, |acc, &x| {
-                let tmp = *acc;
-                *acc += x;
-                Some(tmp)
-            })
-            .collect();
-
-        let mut partition = PartitionMut::new(&mut new_arr[..], ranks, &displs[..]);
-
-        root_process.gather_varcount_into_root(arr, &mut partition);
-        Some(new_arr)
-    } else {
-        root_process.gather_into(&n);
-        root_process.gather_varcount_into(arr);
-        None
-    }
-}
-
 macro_rules! impl_min_max_value {
     ($type:ty) => {
         impl MinValue for $type {
