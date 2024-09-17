@@ -1,9 +1,13 @@
 //! Utility routines.
 
+use std::mem::MaybeUninit;
+
+use itertools::Itertools;
 use mpi::{
     collective::SystemOperation,
     datatype::PartitionMut,
-    traits::{CommunicatorCollectives, Equivalence, Root},
+    point_to_point as p2p,
+    traits::{CommunicatorCollectives, Destination, Equivalence, Root, Source},
 };
 
 /// Gather array to all processes
@@ -99,23 +103,56 @@ pub fn global_size<T, C: CommunicatorCollectives>(arr: &[T], comm: &C) -> usize 
     global_size
 }
 
-/// Check if an array is sorted.
-pub fn is_sorted_array<T: Equivalence, C: CommunicatorCollectives>(
-    arr: &[MortonKey],
+/// Communicate the first element of each local array back to the previous rank.
+pub fn communicate_back<T: Equivalence, C: CommunicatorCollectives>(
+    arr: &[T],
     comm: &C,
-) -> Option<bool> {
-    let arr = gather_to_root(arr, comm);
-    if comm.rank() == 0 {
-        let arr = arr.unwrap();
-        for (&elem1, &elem2) in arr.iter().tuple_windows() {
-            if elem1 > elem2 {
-                return Some(false);
-            }
-        }
-        Some(true)
+) -> Option<T> {
+    let rank = comm.rank();
+    let size = comm.size();
+
+    if rank == size - 1 {
+        comm.process_at_rank(rank - 1).send(arr.first().unwrap());
+        return None;
     } else {
-        None
+        let (new_last, _status) = if rank > 0 {
+            p2p::send_receive(
+                arr.first().unwrap(),
+                &comm.process_at_rank(rank - 1),
+                &comm.process_at_rank(rank + 1),
+            )
+        } else {
+            comm.process_at_rank(1).receive::<T>()
+        };
+        Some(new_last)
     }
+}
+
+/// Check if an array is sorted.
+pub fn is_sorted_array<T: Equivalence + PartialOrd, C: CommunicatorCollectives>(
+    arr: &[T],
+    comm: &C,
+) -> bool {
+    let mut sorted = true;
+    for (elem1, elem2) in arr.iter().tuple_windows() {
+        if elem1 > elem2 {
+            sorted = false;
+        }
+    }
+
+    if let Some(next_first) = communicate_back(arr, comm) {
+        sorted = *arr.last().unwrap() <= next_first;
+    }
+
+    let mut global_sorted: bool = false;
+    comm.all_reduce_into(&sorted, &mut global_sorted, SystemOperation::logical_and());
+
+    global_sorted
+}
+
+/// Redistribute an array via an all_to_all_varcount operation.
+pub fn redistribute<T: Equivalence>(arr: &[T], counts: &[i32]) {
+    todo!();
 }
 
 /// Compute displacements from a vector of counts.

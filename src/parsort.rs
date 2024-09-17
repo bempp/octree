@@ -5,12 +5,14 @@ use std::mem::offset_of;
 
 use itertools::Itertools;
 use mpi::datatype::{UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
-use mpi::traits::{Equivalence, Root};
+use mpi::traits::Equivalence;
 use mpi::{
     datatype::{Partition, PartitionMut},
     traits::CommunicatorCollectives,
 };
 use rand::{seq::SliceRandom, Rng};
+
+use crate::tools::displacements;
 
 const OVERSAMPLING: usize = 8;
 
@@ -177,14 +179,7 @@ where
     let mut all_splitters = vec![Default::default(); n_all_splitters];
     let splitters_per_rank = splitters_per_rank.iter().map(|&x| x as i32).collect_vec();
 
-    let displs: Vec<i32> = splitters_per_rank
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp)
-        })
-        .collect();
+    let displs = displacements(&splitters_per_rank);
 
     let mut partition = PartitionMut::new(&mut all_splitters[..], splitters_per_rank, &displs[..]);
     comm.all_gather_varcount_into(&splitters, &mut partition);
@@ -331,28 +326,15 @@ pub fn parsort<T: ParallelSortable, C: CommunicatorCollectives, R: Rng + ?Sized>
     // Each processor now knows how much he gets from all the others.
 
     // We can now send around the actual elements with an alltoallv.
-    let send_displs: Vec<i32> = counts
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp)
-        })
-        .collect();
+
+    let send_displs = displacements(&counts);
 
     let send_partition = Partition::new(&arr, counts, &send_displs[..]);
 
     let mut recvbuffer =
         vec![UniqueItem::default(); counts_from_processor.iter().sum::<i32>() as usize];
 
-    let recv_displs: Vec<i32> = counts_from_processor
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp)
-        })
-        .collect();
+    let recv_displs = displacements(&counts_from_processor);
 
     let mut receiv_partition =
         PartitionMut::new(&mut recvbuffer[..], counts_from_processor, &recv_displs[..]);
