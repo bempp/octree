@@ -12,7 +12,7 @@ use mpi::{
 };
 use rand::{seq::SliceRandom, Rng};
 
-use crate::tools::displacements;
+use crate::tools::{displacements, gather_to_all};
 
 const OVERSAMPLING: usize = 8;
 
@@ -162,27 +162,9 @@ where
         .copied()
         .collect::<Vec<_>>();
 
-    // We use an all_gatherv so that each process receives all splitters.
-    // For that we first communicate how many splitters each process has
-    // and then we send the splitters themselves.
+    // We gather the splitters into all ranks so that each rank has all splitters.
 
-    let nsplitters = splitters.len();
-    let mut splitters_per_rank = vec![0_usize; size];
-
-    comm.all_gather_into(&nsplitters, &mut splitters_per_rank);
-
-    // We now know how many splitters each process has. We now create space
-    // for the splitters and send them all around.
-
-    let n_all_splitters = splitters_per_rank.iter().sum();
-
-    let mut all_splitters = vec![Default::default(); n_all_splitters];
-    let splitters_per_rank = splitters_per_rank.iter().map(|&x| x as i32).collect_vec();
-
-    let displs = displacements(&splitters_per_rank);
-
-    let mut partition = PartitionMut::new(&mut all_splitters[..], splitters_per_rank, &displs[..]);
-    comm.all_gather_varcount_into(&splitters, &mut partition);
+    let mut all_splitters = gather_to_all(&splitters, comm);
 
     // We now have all splitters available on each process.
     // We can now sort the splitters. Every process will then have the same list of sorted splitters.

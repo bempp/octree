@@ -1,13 +1,14 @@
 //! Utility routines.
 
-use std::mem::MaybeUninit;
-
 use itertools::Itertools;
 use mpi::{
     collective::SystemOperation,
-    datatype::PartitionMut,
+    datatype::{Partition, PartitionMut},
     point_to_point as p2p,
-    traits::{CommunicatorCollectives, Destination, Equivalence, Root, Source},
+    traits::{
+        CommunicatorCollectives, Destination, Equivalence, PartitionedBuffer, PartitionedBufferMut,
+        Root, Source,
+    },
 };
 
 /// Gather array to all processes
@@ -140,6 +141,10 @@ pub fn is_sorted_array<T: Equivalence + PartialOrd, C: CommunicatorCollectives>(
         }
     }
 
+    if comm.size() == 1 {
+        return sorted;
+    }
+
     if let Some(next_first) = communicate_back(arr, comm) {
         sorted = *arr.last().unwrap() <= next_first;
     }
@@ -151,8 +156,35 @@ pub fn is_sorted_array<T: Equivalence + PartialOrd, C: CommunicatorCollectives>(
 }
 
 /// Redistribute an array via an all_to_all_varcount operation.
-pub fn redistribute<T: Equivalence>(arr: &[T], counts: &[i32]) {
-    todo!();
+pub fn redistribute<T: Equivalence, C: CommunicatorCollectives>(
+    arr: &[T],
+    counts: &[i32],
+    comm: &C,
+) -> Vec<T> {
+    assert_eq!(counts.len(), comm.size() as usize);
+
+    // First send the counts around via an alltoall operation.
+
+    let mut recv_counts = vec![0 as i32; counts.len()];
+
+    comm.all_to_all_into(&counts[..], &mut recv_counts);
+
+    // We have the recv_counts. Allocate space and setup the partitions.
+
+    let nelems = recv_counts.iter().sum::<i32>() as usize;
+
+    let mut output = Vec::<T>::with_capacity(nelems);
+    let out_buf: &mut [T] = unsafe { std::mem::transmute(output.spare_capacity_mut()) };
+
+    let send_partition = Partition::new(arr, counts, displacements(counts));
+    let mut recv_partition =
+        PartitionMut::new(out_buf, &recv_counts[..], displacements(&recv_counts));
+
+    comm.all_to_all_varcount_into(&send_partition, &mut recv_partition);
+
+    unsafe { output.set_len(nelems) };
+
+    output
 }
 
 /// Compute displacements from a vector of counts.
