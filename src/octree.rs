@@ -7,11 +7,10 @@ use crate::{
     geometry::PhysicalBox,
     morton::MortonKey,
     parsort::parsort,
-    tools::gather_to_all,
+    tools::{communicate_back, gather_to_all, redistribute},
 };
 
 use mpi::{
-    datatype::{Partition, PartitionMut},
     point_to_point as p2p,
     traits::{Root, Source},
 };
@@ -132,19 +131,6 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
         .iter()
         .map(|&point| MortonKey::from_physical_point(point, &bounding_box, max_level))
         .collect_vec();
-
-    // Now want to get weighted Morton keys. We use a HashMap.
-
-    let mut value_counts = HashMap::<MortonKey, usize>::new();
-
-    for key in &keys {
-        *value_counts.entry(*key).or_insert(0) += 1;
-    }
-
-    // let weighted_keys = value_counts
-    //     .iter()
-    //     .map(|(&key, &weight)| WeightedMortonKey::new(key, weight))
-    //     .collect_vec();
 
     (keys, bounding_box)
 }
@@ -295,15 +281,9 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     // defines bins in which we sort our keys. The keys are then sent around to the correct
     // processes via an alltoallv operation.
 
-    let my_first = *coarse_tree.first().unwrap();
+    let my_first = coarse_tree.first().unwrap();
 
-    let mut global_bins = Vec::<MortonKey>::with_capacity(size as usize);
-    let global_bins_buff: &mut [MortonKey] =
-        unsafe { std::mem::transmute(global_bins.spare_capacity_mut()) };
-
-    comm.all_gather_into(&my_first, global_bins_buff);
-
-    unsafe { global_bins.set_len(size as usize) };
+    let mut global_bins = gather_to_all(std::slice::from_ref(my_first), comm);
 
     // We now have the first index from each process. We also want
     // an upper bound for the last index of the tree to make the sorting into
@@ -321,41 +301,9 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
         .map(|&elem| elem as i32)
         .collect_vec();
 
-    // We now have the counts for each rank. Let's send it around via alltoallv.
+    // We now have the counts for each rank. Let's redistribute accordingly and return.
 
-    let mut counts_from_proc = vec![0 as i32; size as usize];
-
-    comm.all_to_all_into(&rank_counts, &mut counts_from_proc);
-    // Now compute the send and receive displacements.
-
-    // We can now send around the actual elements with an alltoallv.
-    let send_displs: Vec<i32> = rank_counts
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp as i32)
-        })
-        .collect();
-
-    let send_partition = Partition::new(&sorted_keys[..], &rank_counts[..], &send_displs[..]);
-
-    let mut recvbuffer = vec![MortonKey::default(); counts_from_proc.iter().sum::<i32>() as usize];
-
-    let recv_displs: Vec<i32> = counts_from_proc
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp)
-        })
-        .collect();
-
-    let mut receiv_partition =
-        PartitionMut::new(&mut recvbuffer[..], counts_from_proc, &recv_displs[..]);
-    comm.all_to_all_varcount_into(&send_partition, &mut receiv_partition);
-
-    recvbuffer
+    redistribute(&sorted_keys, &rank_counts, comm)
 }
 
 /// Create bins from sorted keys.
@@ -471,43 +419,28 @@ pub fn linearize<R: Rng, C: CommunicatorCollectives>(
 
     let mut result = Vec::<MortonKey>::new();
 
-    if rank == size - 1 {
-        comm.process_at_rank(rank - 1)
-            .send(sorted_keys.first().unwrap());
+    let next_key = communicate_back(&sorted_keys, comm);
 
-        for (&m1, &m2) in sorted_keys.iter().tuple_windows() {
-            // m1 is also ancestor of m2 if they are identical.
-            if m1.is_ancestor(m2) {
-                continue;
-            } else {
-                result.push(m1);
-            }
+    // Treat the local keys
+    for (&m1, &m2) in sorted_keys.iter().tuple_windows() {
+        // m1 is also ancestor of m2 if they are identical.
+        if m1.is_ancestor(m2) {
+            continue;
+        } else {
+            result.push(m1);
         }
+    }
 
+    // If we are at the last process simply push the last key.
+    // Otherwise check whether it might be the ancestor of `next_key`,
+    // the first key on the next process. If yes, don't push it. Otherwise do.
+
+    if rank == size - 1 {
         result.push(*sorted_keys.last().unwrap());
     } else {
-        let (other, _status) = if rank > 0 {
-            p2p::send_receive(
-                sorted_keys.first().unwrap(),
-                &comm.process_at_rank(rank - 1),
-                &comm.process_at_rank(rank + 1),
-            )
-        } else {
-            comm.any_process().receive::<MortonKey>()
-        };
-        for (&m1, &m2) in sorted_keys.iter().tuple_windows() {
-            // m1 is also ancestor of m2 if they are identical.
-            if m1.is_ancestor(m2) {
-                continue;
-            } else {
-                result.push(m1);
-            }
-        }
-
         let last = *sorted_keys.last().unwrap();
-
-        if !last.is_ancestor(other) {
-            result.push(last)
+        if !last.is_ancestor(next_key.unwrap()) {
+            result.push(last);
         }
     }
 
@@ -603,7 +536,6 @@ pub fn partition<C: CommunicatorCollectives>(
     // then send the actual data.
 
     let mut counts = vec![0 as i32; size as usize];
-    let mut counts_from_processor = vec![0 as i32; size as usize];
 
     let mut all_elements = Vec::<MortonKey>::new();
     for (index, c) in counts.iter_mut().enumerate() {
@@ -612,39 +544,7 @@ pub fn partition<C: CommunicatorCollectives>(
         all_elements.extend(elements.iter())
     }
 
-    // Send around the number of elements for each process
-    comm.all_to_all_into(&counts, &mut counts_from_processor);
-
-    // We have the number of elements for each process now. Now send around
-    // the actual elements.
-
-    // We can now send around the actual elements with an alltoallv.
-    let send_displs: Vec<i32> = counts
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp as i32)
-        })
-        .collect();
-
-    let send_partition = Partition::new(&all_elements, &counts[..], &send_displs[..]);
-
-    let mut recvbuffer =
-        vec![MortonKey::default(); counts_from_processor.iter().sum::<i32>() as usize];
-
-    let recv_displs: Vec<i32> = counts_from_processor
-        .iter()
-        .scan(0, |acc, &x| {
-            let tmp = *acc;
-            *acc += x;
-            Some(tmp)
-        })
-        .collect();
-
-    let mut receiv_partition =
-        PartitionMut::new(&mut recvbuffer[..], counts_from_processor, &recv_displs[..]);
-    comm.all_to_all_varcount_into(&send_partition, &mut receiv_partition);
+    let mut recvbuffer = redistribute(&all_elements, &counts, comm);
 
     recvbuffer.sort_unstable();
     recvbuffer

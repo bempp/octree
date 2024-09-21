@@ -5,14 +5,11 @@ use std::mem::offset_of;
 
 use itertools::Itertools;
 use mpi::datatype::{UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
+use mpi::traits::CommunicatorCollectives;
 use mpi::traits::Equivalence;
-use mpi::{
-    datatype::{Partition, PartitionMut},
-    traits::CommunicatorCollectives,
-};
 use rand::{seq::SliceRandom, Rng};
 
-use crate::tools::{displacements, gather_to_all};
+use crate::tools::{gather_to_all, redistribute};
 
 const OVERSAMPLING: usize = 8;
 
@@ -297,30 +294,9 @@ pub fn parsort<T: ParallelSortable, C: CommunicatorCollectives, R: Rng + ?Sized>
         .map(|&elem| elem as i32)
         .collect::<Vec<_>>();
 
-    // We now do an all_to_allv to communicate the array elements to the right processors.
+    // We can now redistribute the array across the processors.
 
-    // First we need to communicate how many elements everybody gets from each processor.
-
-    let mut counts_from_processor = vec![0_i32; size];
-
-    comm.all_to_all_into(&counts, &mut counts_from_processor);
-
-    // Each processor now knows how much he gets from all the others.
-
-    // We can now send around the actual elements with an alltoallv.
-
-    let send_displs = displacements(&counts);
-
-    let send_partition = Partition::new(&arr, counts, &send_displs[..]);
-
-    let mut recvbuffer =
-        vec![UniqueItem::default(); counts_from_processor.iter().sum::<i32>() as usize];
-
-    let recv_displs = displacements(&counts_from_processor);
-
-    let mut receiv_partition =
-        PartitionMut::new(&mut recvbuffer[..], counts_from_processor, &recv_displs[..]);
-    comm.all_to_all_varcount_into(&send_partition, &mut receiv_partition);
+    let mut recvbuffer = redistribute(&arr, &counts, comm);
 
     // We now have everything in the receive buffer. Now sort the local elements and return
 
