@@ -1,15 +1,16 @@
 //! Testing the hyksort component.
 use bempp_octree::constants::{DEEPEST_LEVEL, LEVEL_SIZE};
 use bempp_octree::morton::MortonKey;
-use bempp_octree::octree::{block_partition, is_sorted_array, linearize, partition};
-use bempp_octree::parsort::{array_to_root, parsort};
+use bempp_octree::octree::{block_partition, linearize, partition};
+use bempp_octree::parsort::parsort;
+use bempp_octree::tools::gather_to_root;
 use itertools::{izip, Itertools};
 use mpi::traits::*;
 use rand::prelude::*;
 
 pub fn assert_linearized<C: CommunicatorCollectives>(arr: &Vec<MortonKey>, comm: &C) {
     // Check that the keys are still linearized.
-    let arr = array_to_root(&arr, comm);
+    let arr = gather_to_root(&arr, comm);
 
     if comm.rank() == 0 {
         let arr = arr.unwrap();
@@ -130,7 +131,7 @@ pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, co
         partitioned_tree.0.len()
     );
 
-    let arr = array_to_root(&partitioned_tree.0, comm);
+    let arr = gather_to_root(&partitioned_tree.0, comm);
 
     if rank == 0 {
         let arr = arr.unwrap();

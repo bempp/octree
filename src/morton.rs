@@ -466,6 +466,33 @@ impl MortonKey {
         key
     }
 
+    /// Return the next possible Morton key on the deepest level that is not a descendent of the current key.
+    ///
+    /// If the key is already the last possible key then return None.
+    pub fn next_non_descendent_key(&self) -> Option<MortonKey> {
+        // If we are an ancestor of deepest_last we return None as then there
+        // is next key.
+
+        if self.is_ancestor(MortonKey::deepest_last()) {
+            return None;
+        }
+
+        let level = self.level() as u64;
+
+        let level_diff = DEEPEST_LEVEL - level;
+        let shift = LEVEL_DISPLACEMENT + 3 * level_diff;
+
+        // Need to know which sibling we are.
+        let child_index = ((self.value >> shift) % 8) as usize;
+        // If we are between 0 and 6 take the next sibling and go to deepest level.
+        if child_index < 7 {
+            Some(MortonKey::new(self.value + (1 << shift) + level_diff))
+        } else {
+            // If we are the last child go to the parent and take next key from there.
+            self.parent().next_non_descendent_key()
+        }
+    }
+
     /// Linearize by sorting and removing overlaps.
     pub fn linearize(keys: &[MortonKey]) -> Vec<MortonKey> {
         let mut new_keys = Vec::<MortonKey>::new();
@@ -1314,5 +1341,40 @@ mod test {
                 DEEPEST_LEVEL as usize
             )
         );
+    }
+
+    #[test]
+    pub fn test_next_nondescendent_key() {
+        let key = MortonKey::from_index_and_level([25, 17, 6], 5);
+
+        let children = key.children();
+
+        // Check the next nondescendent key for the first six children
+
+        for (child, next_child) in children.iter().tuple_windows() {
+            let next_key = child.next_non_descendent_key().unwrap();
+            assert_eq!(next_key.level(), DEEPEST_LEVEL as usize);
+            assert!(!child.is_ancestor(next_key));
+            assert!(next_child.is_ancestor(next_key));
+        }
+
+        // Now check the next nondescendent key from the last child.
+
+        let next_child = children.last().unwrap().next_non_descendent_key();
+
+        // Check that the next nondescendent key from the parent is the same as that of the last child.
+
+        assert_eq!(key.next_non_descendent_key(), next_child);
+
+        // Check that it is not a descendent of the parent and that its level is correct.
+
+        assert_eq!(next_child.unwrap().level(), DEEPEST_LEVEL as usize);
+        assert!(!key.is_ancestor(next_child.unwrap()));
+
+        // Finally make sure that an ancestor of deepest last returns None.
+
+        assert!(MortonKey::deepest_last()
+            .next_non_descendent_key()
+            .is_none());
     }
 }
