@@ -625,3 +625,73 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
 
     result
 }
+
+/// Return true on all ranks if distributed tree is complete. Otherwise, return false.
+pub fn is_complete_linear_tree<C: CommunicatorCollectives>(arr: &[MortonKey], comm: &C) -> bool {
+    // First check that the local tree on each node is complete.
+
+    let mut complete_linear = true;
+    for (key1, key2) in arr.iter().tuple_windows() {
+        // Make sure that the keys are sorted and not duplicated.
+        if key1 >= key2 {
+            complete_linear = false;
+            break;
+        }
+        // The next key should be an ancestor of the next non-descendent key.
+        if let Some(expected_next) = key1.next_non_descendent_key() {
+            if !key2.is_ancestor(expected_next) {
+                complete_linear = false;
+                break;
+            }
+        } else {
+            // Only for the very last key there should not be a next non-descendent key.
+            complete_linear = false;
+        }
+    }
+
+    // We now check the interfaces.
+
+    if let Some(next_first) = communicate_back(arr, comm) {
+        // We are on any but the last rank
+        let last_key = arr.last().unwrap();
+
+        // Check that the keys are sorted and not duplicated.
+        if *last_key >= next_first {
+            complete_linear = false;
+        }
+
+        // Check that the next key is an encestor of the next non-descendent.
+        if let Some(expected_next) = last_key.next_non_descendent_key() {
+            if !next_first.is_ancestor(expected_next) {
+                complete_linear = false;
+            }
+        } else {
+            complete_linear = false;
+        }
+    } else {
+        // We are on the last rank
+        // Check that the last key is ancestor of deepest last.
+        if !arr.last().unwrap().is_ancestor(MortonKey::deepest_last()) {
+            complete_linear = false;
+        }
+    }
+
+    // Now check that at the first rank we include the deepest first.
+
+    if comm.rank() == 0 {
+        if !arr.first().unwrap().is_ancestor(MortonKey::deepest_first()) {
+            complete_linear = false;
+        }
+    }
+
+    // Now communicate everything together.
+
+    let mut result = false;
+    comm.all_reduce_into(
+        &complete_linear,
+        &mut result,
+        SystemOperation::logical_and(),
+    );
+
+    result
+}
