@@ -1,71 +1,28 @@
 //! Implementation of a parallel samplesort.
 
 use std::fmt::Display;
-use std::mem::offset_of;
 
 use itertools::Itertools;
-use mpi::datatype::{UncommittedDatatypeRef, UncommittedUserDatatype, UserDatatype};
 use mpi::traits::CommunicatorCollectives;
 use mpi::traits::Equivalence;
 use rand::{seq::SliceRandom, Rng};
 
+use crate::morton::MortonKey;
 use crate::tools::{gather_to_all, global_max, global_min, redistribute_by_bins};
 
 const OVERSAMPLING: usize = 8;
 
-/// Sortable trait that each type fed into parsort needs to satisfy.
-pub trait ParallelSortable:
-    Equivalence + Copy + Clone + PartialEq + Eq + PartialOrd + Ord + Display + Sized
-{
-}
-
-impl<T: Equivalence + Copy + Clone + PartialEq + Eq + PartialOrd + Ord + Display + Sized>
-    ParallelSortable for T
-{
-}
-
 /// An internal struct. We convert every array element
 /// into this struct. The idea is that this is guaranteed to be unique
 /// as it encodes not only the element but also its rank and index.
-#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
-struct UniqueItem<T: ParallelSortable> {
-    pub value: T,
+#[derive(Copy, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Equivalence)]
+struct UniqueItem {
+    pub value: MortonKey,
     pub rank: usize,
     pub index: usize,
 }
 
-unsafe impl<T: ParallelSortable> Equivalence for UniqueItem<T> {
-    type Out = UserDatatype;
-
-    // Depending on the MPI implementation the below offset needs
-    // to be an i64 or isize. If it is an i64 Clippy warns about
-    // a useless conversion. But this warning is MPI implementation
-    // dependent. So switch off here.
-
-    #[allow(clippy::useless_conversion)]
-    fn equivalent_datatype() -> Self::Out {
-        UserDatatype::structured::<UncommittedDatatypeRef>(
-            &[1, 1, 1],
-            &[
-                (offset_of!(UniqueItem<T>, value) as i64)
-                    .try_into()
-                    .unwrap(),
-                (offset_of!(UniqueItem<T>, rank) as i64).try_into().unwrap(),
-                (offset_of!(UniqueItem<T>, index) as i64)
-                    .try_into()
-                    .unwrap(),
-            ],
-            &[
-                UncommittedUserDatatype::contiguous(1, &<T as Equivalence>::equivalent_datatype())
-                    .as_ref(),
-                usize::equivalent_datatype().into(),
-                usize::equivalent_datatype().into(),
-            ],
-        )
-    }
-}
-
-impl<T: ParallelSortable> Display for UniqueItem<T> {
+impl Display for UniqueItem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -75,22 +32,21 @@ impl<T: ParallelSortable> Display for UniqueItem<T> {
     }
 }
 
-impl<T: ParallelSortable> UniqueItem<T> {
-    pub fn new(value: T, rank: usize, index: usize) -> Self {
+impl UniqueItem {
+    pub fn new(value: MortonKey, rank: usize, index: usize) -> Self {
         Self { value, rank, index }
     }
 }
 
-fn to_unique_item<T: ParallelSortable>(arr: &[T], rank: usize) -> Vec<UniqueItem<T>> {
+fn to_unique_item(arr: &[MortonKey], rank: usize) -> Vec<UniqueItem> {
     arr.iter()
         .enumerate()
         .map(|(index, &item)| UniqueItem::new(item, rank, index))
         .collect()
 }
 
-fn get_buckets<T, C, R>(arr: &[UniqueItem<T>], comm: &C, rng: &mut R) -> Vec<UniqueItem<T>>
+fn get_buckets<C, R>(arr: &[UniqueItem], comm: &C, rng: &mut R) -> Vec<UniqueItem>
 where
-    T: ParallelSortable,
     C: CommunicatorCollectives,
     R: Rng + ?Sized,
 {
@@ -149,11 +105,11 @@ where
 }
 
 /// Parallel sort
-pub fn parsort<T: ParallelSortable, C: CommunicatorCollectives, R: Rng + ?Sized>(
-    arr: &[T],
+pub fn parsort<C: CommunicatorCollectives, R: Rng + ?Sized>(
+    arr: &[MortonKey],
     comm: &C,
     rng: &mut R,
-) -> Vec<T> {
+) -> Vec<MortonKey> {
     let size = comm.size() as usize;
     let rank = comm.rank() as usize;
     // If we only have a single rank simply sort the local array and return

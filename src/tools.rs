@@ -12,6 +12,12 @@ use mpi::{
     },
 };
 use num::traits::Zero;
+use rand::Rng;
+
+use crate::{
+    constants::{DEEPEST_LEVEL, LEVEL_SIZE},
+    morton::MortonKey,
+};
 
 /// Gather array to all processes
 pub fn gather_to_all<T: Equivalence, C: CommunicatorCollectives>(arr: &[T], comm: &C) -> Vec<T> {
@@ -350,6 +356,24 @@ pub fn redistribute_by_bins<T: Equivalence + Ord, C: CommunicatorCollectives>(
     let counts = sort_to_bins(sorted_keys, bins);
     let counts = counts.iter().map(|elem| *elem as i32).collect_vec();
     redistribute(sorted_keys, &counts, comm)
+}
+
+/// Generate random keys for testing.
+pub fn generate_random_keys<R: Rng>(nkeys: usize, rng: &mut R) -> Vec<MortonKey> {
+    let mut result = Vec::<MortonKey>::with_capacity(nkeys);
+
+    let xindices = rand::seq::index::sample(rng, LEVEL_SIZE as usize, nkeys);
+    let yindices = rand::seq::index::sample(rng, LEVEL_SIZE as usize, nkeys);
+    let zindices = rand::seq::index::sample(rng, LEVEL_SIZE as usize, nkeys);
+
+    for (xval, yval, zval) in izip!(xindices.iter(), yindices.iter(), zindices.iter()) {
+        result.push(MortonKey::from_index_and_level(
+            [xval, yval, zval],
+            DEEPEST_LEVEL as usize,
+        ));
+    }
+
+    result
 }
 
 /// Compute displacements from a vector of counts.

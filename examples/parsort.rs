@@ -1,5 +1,8 @@
 //! Testing the hyksort component.
-use bempp_octree::{parsort::parsort, tools::is_sorted_array};
+use bempp_octree::{
+    parsort::parsort,
+    tools::{generate_random_keys, is_sorted_array},
+};
 use mpi::traits::Communicator;
 use rand::prelude::*;
 
@@ -10,13 +13,9 @@ pub fn main() {
 
     let mut rng = rand::rngs::StdRng::seed_from_u64(0);
 
-    let mut arr = Vec::<u64>::new();
+    let keys = generate_random_keys(n_per_rank, &mut rng);
 
-    for _ in 0..n_per_rank {
-        arr.push(rng.gen());
-    }
-
-    let arr = parsort(&arr, &world, &mut rng);
+    let arr = parsort(&keys, &world, &mut rng);
 
     assert!(is_sorted_array(&arr, &world));
 
