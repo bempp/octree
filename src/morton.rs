@@ -6,7 +6,6 @@ use crate::constants::{
     Y_LOOKUP_ENCODE, Z_LOOKUP_DECODE, Z_LOOKUP_ENCODE,
 };
 use crate::geometry::PhysicalBox;
-use crate::parsort::{MaxValue, MinValue};
 use itertools::izip;
 use itertools::Itertools;
 use mpi::traits::Equivalence;
@@ -24,18 +23,6 @@ pub struct MortonKey {
 impl Default for MortonKey {
     fn default() -> Self {
         MortonKey::invalid_key()
-    }
-}
-
-impl MinValue for MortonKey {
-    fn min_value() -> Self {
-        MortonKey::root()
-    }
-}
-
-impl MaxValue for MortonKey {
-    fn max_value() -> Self {
-        MortonKey::deepest_last()
     }
 }
 

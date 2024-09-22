@@ -105,6 +105,36 @@ pub fn global_size<T, C: CommunicatorCollectives>(arr: &[T], comm: &C) -> usize 
     global_size
 }
 
+/// Get the maximum value across all ranks
+pub fn global_max<T: Equivalence + Copy + Ord, C: CommunicatorCollectives>(
+    arr: &[T],
+    comm: &C,
+) -> T {
+    let local_max = arr.iter().max().unwrap();
+
+    // Just need to initialize global_max with something.
+    let mut global_max = *local_max;
+
+    comm.all_reduce_into(local_max, &mut global_max, SystemOperation::max());
+
+    global_max
+}
+
+/// Get the minimum value across all ranks
+pub fn global_min<T: Equivalence + Copy + Ord, C: CommunicatorCollectives>(
+    arr: &[T],
+    comm: &C,
+) -> T {
+    let local_min = arr.iter().min().unwrap();
+
+    // Just need to initialize global_min with something.
+    let mut global_min = *local_min;
+
+    comm.all_reduce_into(local_min, &mut global_min, SystemOperation::min());
+
+    global_min
+}
+
 /// Communicate the first element of each local array back to the previous rank.
 pub fn communicate_back<T: Equivalence, C: CommunicatorCollectives>(
     arr: &[T],

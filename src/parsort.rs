@@ -9,41 +9,18 @@ use mpi::traits::CommunicatorCollectives;
 use mpi::traits::Equivalence;
 use rand::{seq::SliceRandom, Rng};
 
-use crate::tools::{gather_to_all, redistribute};
+use crate::tools::{gather_to_all, global_max, global_min, redistribute_by_bins};
 
 const OVERSAMPLING: usize = 8;
 
 /// Sortable trait that each type fed into parsort needs to satisfy.
 pub trait ParallelSortable:
-    MinValue
-    + MaxValue
-    + Equivalence
-    + Copy
-    + Clone
-    + Default
-    + PartialEq
-    + Eq
-    + PartialOrd
-    + Ord
-    + Display
-    + Sized
+    Equivalence + Copy + Clone + PartialEq + Eq + PartialOrd + Ord + Display + Sized
 {
 }
 
-impl<
-        T: MinValue
-            + MaxValue
-            + Equivalence
-            + Copy
-            + Clone
-            + Default
-            + PartialEq
-            + Eq
-            + PartialOrd
-            + Ord
-            + Display
-            + Sized,
-    > ParallelSortable for T
+impl<T: Equivalence + Copy + Clone + PartialEq + Eq + PartialOrd + Ord + Display + Sized>
+    ParallelSortable for T
 {
 }
 
@@ -88,18 +65,6 @@ unsafe impl<T: ParallelSortable> Equivalence for UniqueItem<T> {
     }
 }
 
-/// Return the minimum possible value of a type.
-pub trait MinValue {
-    /// Return the min value.
-    fn min_value() -> Self;
-}
-
-/// Return the maximum possible value of a type.
-pub trait MaxValue {
-    /// Return the max value.
-    fn max_value() -> Self;
-}
-
 impl<T: ParallelSortable> Display for UniqueItem<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -107,18 +72,6 @@ impl<T: ParallelSortable> Display for UniqueItem<T> {
             "(value: {}, rank: {}, index: {})",
             self.value, self.rank, self.index
         )
-    }
-}
-
-impl<T: ParallelSortable> MinValue for UniqueItem<T> {
-    fn min_value() -> Self {
-        UniqueItem::new(<T as MinValue>::min_value(), 0, 0)
-    }
-}
-
-impl<T: ParallelSortable> MaxValue for UniqueItem<T> {
-    fn max_value() -> Self {
-        UniqueItem::new(<T as MaxValue>::max_value(), 0, 0)
     }
 }
 
@@ -151,8 +104,13 @@ where
         OVERSAMPLING
     };
 
-    // We are choosing unique splitters that neither contain
-    // zero nor u64::max.
+    // We get the global smallest and global largest element. We do not want those
+    // in the splitter so filter out their occurence.
+
+    let global_min_elem = global_min(arr, comm);
+    let global_max_elem = global_max(arr, comm);
+
+    // We do not want the global smallest element in the splitter.
 
     let splitters = arr
         .choose_multiple(rng, oversampling)
@@ -171,89 +129,23 @@ where
     // We now insert the smallest and largest possible element if they are not already
     // in the splitter collection.
 
-    if *all_splitters.first().unwrap() != UniqueItem::min_value() {
-        all_splitters.insert(0, UniqueItem::min_value())
+    if *all_splitters.first().unwrap() != global_min_elem {
+        all_splitters.insert(0, global_min_elem)
     }
 
-    if *all_splitters.last().unwrap() != UniqueItem::max_value() {
-        all_splitters.push(UniqueItem::max_value());
+    if *all_splitters.last().unwrap() != global_max_elem {
+        all_splitters.push(global_max_elem);
     }
 
     // We now define p buckets (p is number of processors) and we return
-    // a p + 1 element array containing the first element of each bucket
-    // concluded with the largest possible element.
+    // a p element array containing the first element of each bucket
 
     all_splitters = split(&all_splitters, size)
         .map(|slice| slice.first().unwrap())
         .copied()
         .collect::<Vec<_>>();
-    all_splitters.push(UniqueItem::max_value());
 
     all_splitters
-}
-
-fn get_counts<T: ParallelSortable>(arr: &[UniqueItem<T>], buckets: &[UniqueItem<T>]) -> Vec<usize> {
-    // The following array will store the counts for each bucket.
-
-    let mut counts = vec![0_usize; buckets.len() - 1];
-
-    // We are iterating through the array. Whenever an element is larger or equal than
-    // the current splitter we store the current position in `bin_displs` and advance `splitter_iter`
-    // by 1.
-
-    // In the following iterator we skip the first bin displacement position as this must be the default
-    // zero (start of the bins).
-
-    // Note that bucket iterator has as many elements as counts as the tuple_windows has length
-    // 1 smaller than the original array length.
-    let mut bucket_iter = buckets.iter().tuple_windows::<(_, _)>();
-
-    // We skip the first element as this is always zero.
-    let mut count_iter = counts.iter_mut();
-
-    let mut count: usize = 0;
-    let mut current_count = count_iter.next().unwrap();
-
-    let (mut first, mut last) = bucket_iter.next().unwrap();
-
-    for elem in arr {
-        // The test after the or sorts out the case that our set includes the maximum possible
-        // item and we are in the last bucket. The biggest item should be counted as belonging
-        // to the bucket.
-        if (first <= elem && elem < last)
-            || (*last == UniqueItem::max_value() && *elem == UniqueItem::max_value())
-        {
-            // Element is in the right bucket.
-            count += 1;
-            continue;
-        } else {
-            // Element is not in the right bucket.
-            // Store counts and find the correct bucket.
-            *current_count = count;
-            loop {
-                (first, last) = bucket_iter.next().unwrap();
-                current_count = count_iter.next().unwrap();
-                if (first <= elem && elem < last)
-                    || (*last == UniqueItem::max_value() && *elem == UniqueItem::max_value())
-                {
-                    break;
-                }
-            }
-            // Now have the right bucket. Reset count and continue.
-            count = 1;
-        }
-    }
-
-    // Need to store the count for the last bucket in the iterator.
-    // This is always necessary as last iterator is half open interval.
-    // So we don't go into the else part of the for loop.
-
-    *current_count = count;
-
-    // We don't need to fill the remaining counts entries with zero
-    // since the array is already initialized with zero.
-
-    counts
 }
 
 /// Parallel sort
@@ -287,16 +179,8 @@ pub fn parsort<T: ParallelSortable, C: CommunicatorCollectives, R: Rng + ?Sized>
 
     let buckets = get_buckets(&arr, comm, rng);
 
-    // We now compute how many elements of our array go into each bucket.
-
-    let counts = get_counts(&arr, &buckets)
-        .iter()
-        .map(|&elem| elem as i32)
-        .collect::<Vec<_>>();
-
-    // We can now redistribute the array across the processors.
-
-    let mut recvbuffer = redistribute(&arr, &counts, comm);
+    // We now redistribute with respect to these buckets.
+    let mut recvbuffer = redistribute_by_bins(&arr, &buckets, comm);
 
     // We now have everything in the receive buffer. Now sort the local elements and return
 
@@ -336,27 +220,3 @@ impl<'a, T> Iterator for Split<'a, T> {
         Some(chunk)
     }
 }
-
-macro_rules! impl_min_max_value {
-    ($type:ty) => {
-        impl MinValue for $type {
-            fn min_value() -> Self {
-                <$type>::MIN
-            }
-        }
-
-        impl MaxValue for $type {
-            fn max_value() -> Self {
-                <$type>::MAX
-            }
-        }
-    };
-}
-
-impl_min_max_value!(usize);
-impl_min_max_value!(i8);
-impl_min_max_value!(i32);
-impl_min_max_value!(i64);
-impl_min_max_value!(u8);
-impl_min_max_value!(u32);
-impl_min_max_value!(u64);
