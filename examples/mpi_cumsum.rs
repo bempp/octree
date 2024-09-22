@@ -25,7 +25,7 @@ pub fn main() {
 
     // Generate random numbers
 
-    let mut elems = Vec::<usize>::with_capacity(3 * nelems);
+    let mut elems = Vec::<usize>::with_capacity(nelems);
 
     for _ in 0..nelems {
         elems.push(rng.gen_range(0..100));

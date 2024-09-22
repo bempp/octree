@@ -28,6 +28,7 @@ num = "0.4.*"
 bytemuck = "1.*"
 vtkio = "0.6.*"
 mpi = {version = "0.8.*", features = ["derive", "user-operations"] }
+once_cell = "*"
 
 [profile.release]
 debug = 1

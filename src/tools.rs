@@ -2,12 +2,13 @@
 
 use itertools::{izip, Itertools};
 use mpi::{
-    collective::SystemOperation,
-    datatype::{Partition, PartitionMut},
+    collective::{SystemOperation, UserOperation},
+    datatype::{DynBuffer, Partition, PartitionMut},
     point_to_point as p2p,
+    raw::AsRaw,
     traits::{
-        CommunicatorCollectives, Destination, Equivalence, PartitionedBuffer, PartitionedBufferMut,
-        Root, Source,
+        AsDatatype, CommunicatorCollectives, Destination, Equivalence, PartitionedBuffer,
+        PartitionedBufferMut, Root, Source,
     },
 };
 use num::traits::Zero;
@@ -115,7 +116,17 @@ pub fn global_max<T: Equivalence + Copy + Ord, C: CommunicatorCollectives>(
     // Just need to initialize global_max with something.
     let mut global_max = *local_max;
 
-    comm.all_reduce_into(local_max, &mut global_max, SystemOperation::max());
+    comm.all_reduce_into(
+        local_max,
+        &mut global_max,
+        &UserOperation::commutative(|x, y| {
+            let x: &[T] = x.downcast().unwrap();
+            let y: &mut [T] = y.downcast().unwrap();
+            for (&x_i, y_i) in x.iter().zip(y) {
+                *y_i = x_i.max(*y_i);
+            }
+        }),
+    );
 
     global_max
 }
@@ -125,12 +136,22 @@ pub fn global_min<T: Equivalence + Copy + Ord, C: CommunicatorCollectives>(
     arr: &[T],
     comm: &C,
 ) -> T {
-    let local_min = arr.iter().min().unwrap();
+    let local_min = *arr.iter().min().unwrap();
 
     // Just need to initialize global_min with something.
-    let mut global_min = *local_min;
+    let mut global_min = local_min;
 
-    comm.all_reduce_into(local_min, &mut global_min, SystemOperation::min());
+    comm.all_reduce_into(
+        &local_min,
+        &mut global_min,
+        &UserOperation::commutative(|x, y| {
+            let x: &[T] = x.downcast().unwrap();
+            let y: &mut [T] = y.downcast().unwrap();
+            for (&x_i, y_i) in x.iter().zip(y) {
+                *y_i = x_i.min(*y_i);
+            }
+        }),
+    );
 
     global_min
 }
