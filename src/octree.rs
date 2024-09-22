@@ -1,25 +1,17 @@
 //! Parallel Octree structure
 
-use std::collections::HashMap;
-
 use crate::{
     constants::{DEEPEST_LEVEL, NSIBLINGS},
     geometry::PhysicalBox,
     morton::MortonKey,
     parsort::parsort,
-    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute},
+    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute, sort_to_bins},
 };
 
-use mpi::{
-    point_to_point as p2p,
-    traits::{Root, Source},
-};
+use mpi::traits::Root;
 
 use itertools::{izip, Itertools};
-use mpi::{
-    collective::SystemOperation,
-    traits::{CommunicatorCollectives, Destination},
-};
+use mpi::{collective::SystemOperation, traits::CommunicatorCollectives};
 use rand::Rng;
 
 /// Compute the global bounding box across all points on all processes.
@@ -283,12 +275,7 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 
     let my_first = coarse_tree.first().unwrap();
 
-    let mut global_bins = gather_to_all(std::slice::from_ref(my_first), comm);
-
-    // We now have the first index from each process. We also want
-    // an upper bound for the last index of the tree to make the sorting into
-    // bins easier.
-    global_bins.push(MortonKey::upper_bound());
+    let global_bins = gather_to_all(std::slice::from_ref(my_first), comm);
 
     // We now have our bins. We go through our keys and store how
     // many keys are assigned to each rank. We are using here that
@@ -306,41 +293,41 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     redistribute(&sorted_keys, &rank_counts, comm)
 }
 
-/// Create bins from sorted keys.
-pub fn sort_to_bins(sorted_keys: &[MortonKey], bins: &[MortonKey]) -> Vec<usize> {
-    let mut bin_counts = vec![0 as usize; bins.len() - 1];
+// /// Create bins from sorted keys.
+// pub fn sort_to_bins(sorted_keys: &[MortonKey], bins: &[MortonKey]) -> Vec<usize> {
+//     let mut bin_counts = vec![0 as usize; bins.len() - 1];
 
-    // This iterates over each possible bin and returns also the associated rank.
-    let mut bin_iter = izip!(
-        bin_counts.iter_mut(),
-        bins.iter().tuple_windows::<(&MortonKey, &MortonKey)>(),
-    );
+//     // This iterates over each possible bin and returns also the associated rank.
+//     let mut bin_iter = izip!(
+//         bin_counts.iter_mut(),
+//         bins.iter().tuple_windows::<(&MortonKey, &MortonKey)>(),
+//     );
 
-    // We take the first element of the bin iterator. There will always be at least one.
-    let mut r: &mut usize;
-    let mut bin_start: &MortonKey;
-    let mut bin_end: &MortonKey;
-    (r, (bin_start, bin_end)) = bin_iter.next().unwrap();
+//     // We take the first element of the bin iterator. There will always be at least one.
+//     let mut r: &mut usize;
+//     let mut bin_start: &MortonKey;
+//     let mut bin_end: &MortonKey;
+//     (r, (bin_start, bin_end)) = bin_iter.next().unwrap();
 
-    for &key in sorted_keys.iter() {
-        if *bin_start <= key && key < *bin_end {
-            *r += 1;
-        } else {
-            // Move the bin forward until it fits. There will always be a fitting bin.
-            while let Some((rn, (bsn, ben))) = bin_iter.next() {
-                if *bsn <= key && key < *ben {
-                    *rn += 1;
-                    r = rn;
-                    bin_start = bsn;
-                    bin_end = ben;
-                    break;
-                }
-            }
-        }
-    }
+//     for &key in sorted_keys.iter() {
+//         if *bin_start <= key && key < *bin_end {
+//             *r += 1;
+//         } else {
+//             // Move the bin forward until it fits. There will always be a fitting bin.
+//             while let Some((rn, (bsn, ben))) = bin_iter.next() {
+//                 if *bsn <= key && key < *ben {
+//                     *rn += 1;
+//                     r = rn;
+//                     bin_start = bsn;
+//                     bin_end = ben;
+//                     break;
+//                 }
+//             }
+//         }
+//     }
 
-    bin_counts
-}
+//     bin_counts
+// }
 
 /// Return a complete tree generated from local keys and associated coarse keys.
 ///
@@ -360,8 +347,7 @@ pub fn create_local_tree(
     // is associated with a coarse slice. For this we need to add an upper bound
     // coarse keys to ensure that we have suitable bins.
 
-    let mut bins = coarse_keys.to_vec();
-    bins.push(MortonKey::upper_bound());
+    let bins = coarse_keys.to_vec();
 
     let counts = sort_to_bins(&sorted_fine_keys, &bins);
 
@@ -390,7 +376,7 @@ pub fn create_local_tree(
         }
     }
 
-    coarse_keys.to_vec()
+    new_coarse_keys.to_vec()
 }
 
 /// Linearize a set of weighted Morton keys.
@@ -485,53 +471,59 @@ pub fn partition<C: CommunicatorCollectives>(
     let w = total_weight / (size as usize);
     let k = total_weight % (size as usize);
 
-    let mut hash_map = HashMap::<usize, Vec<MortonKey>>::new();
-
     // Sort the elements into bins according to which process they should be sent.
+    // We do not need to sort the Morton keys themselves into bins but the scanned weights.
+    // The corresponding counts are the right counts for the Morton keys.
+
+    let mut bins = Vec::<usize>::with_capacity(size as usize);
 
     for p in 1..=size as usize {
-        let q = if p <= k as usize {
-            izip!(sorted_keys, &scan)
-                .filter_map(|(&key, &s)| {
-                    if ((p - 1) * (1 + w) <= s && s < p * (w + 1))
-                        || (p == size as usize && (p - 1) * (1 + w) <= s)
-                    {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect_vec()
+        if p <= k {
+            bins.push((p - 1) * (1 + w));
         } else {
-            izip!(sorted_keys, &scan)
-                .filter_map(|(&key, &s)| {
-                    if ((p - 1) * w + k <= s && s < p * w + k)
-                        || (p == size as usize && (p - 1) * w + k <= s)
-                    {
-                        Some(key)
-                    } else {
-                        None
-                    }
-                })
-                .collect_vec()
-        };
-        hash_map.insert(p - 1, q);
+            bins.push((p - 1) * w + k);
+        }
     }
+
+    let counts = sort_to_bins(&scan, &bins)
+        .iter()
+        .map(|elem| *elem as i32)
+        .collect_vec();
+
+    // for p in 1..=size as usize {
+    //     let q = if p <= k as usize {
+    //         izip!(sorted_keys, &scan)
+    //             .filter_map(|(&key, &s)| {
+    //                 if ((p - 1) * (1 + w) <= s && s < p * (w + 1))
+    //                     || (p == size as usize && (p - 1) * (1 + w) <= s)
+    //                 {
+    //                     Some(key)
+    //                 } else {
+    //                     None
+    //                 }
+    //             })
+    //             .collect_vec()
+    //     } else {
+    //         izip!(sorted_keys, &scan)
+    //             .filter_map(|(&key, &s)| {
+    //                 if ((p - 1) * w + k <= s && s < p * w + k)
+    //                     || (p == size as usize && (p - 1) * w + k <= s)
+    //                 {
+    //                     Some(key)
+    //                 } else {
+    //                     None
+    //                 }
+    //             })
+    //             .collect_vec()
+    //     };
+    //     hash_map.insert(p - 1, q);
+    // }
 
     // Now distribute the data with an all to all v.
     // We create a vector of how many elements to send to each process and
     // then send the actual data.
 
-    let mut counts = vec![0 as i32; size as usize];
-
-    let mut all_elements = Vec::<MortonKey>::new();
-    for (index, c) in counts.iter_mut().enumerate() {
-        let elements = hash_map.get(&index).unwrap();
-        *c = elements.len() as i32;
-        all_elements.extend(elements.iter())
-    }
-
-    let mut recvbuffer = redistribute(&all_elements, &counts, comm);
+    let mut recvbuffer = redistribute(&sorted_keys, &counts, comm);
 
     recvbuffer.sort_unstable();
     recvbuffer
@@ -560,42 +552,31 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
     // ancestor of the deepest first key and first element. Correspondingly on the last process
     // we need to insert the last child of the finest ancester of the deepest last key and last element.
 
+    let next_key = communicate_back(&linearized_keys, comm);
+
+    if rank < size - 1 {
+        linearized_keys.push(next_key.unwrap());
+    }
+
+    // Now fix the first key on the first rank.
+
+    if rank == 0 {
+        let first_key = linearized_keys.first().unwrap();
+        let deepest_first = MortonKey::deepest_first();
+        if !first_key.is_ancestor(deepest_first) {
+            let ancestor = deepest_first.finest_common_ancestor(*first_key);
+            linearized_keys.insert(0, ancestor.children()[0]);
+        }
+    }
+
     if rank == size - 1 {
-        // On last process send first element to previous processes and insert last
-        // possible box from region into list.
-        comm.process_at_rank(rank - 1)
-            .send(linearized_keys.first().unwrap());
-        let last_key = *linearized_keys.last().unwrap();
+        let last_key = linearized_keys.last().unwrap();
         let deepest_last = MortonKey::deepest_last();
         if !last_key.is_ancestor(deepest_last) {
-            let ancestor = deepest_last.finest_common_ancestor(last_key);
+            let ancestor = deepest_last.finest_common_ancestor(*last_key);
             linearized_keys.push(ancestor.children()[NSIBLINGS - 1]);
         }
-    } else {
-        let (other, _status) = if rank > 0 {
-            // On intermediate process receive from the next process
-            // and send first element to previous process.
-            p2p::send_receive(
-                linearized_keys.first().unwrap(),
-                &comm.process_at_rank(rank - 1),
-                &comm.process_at_rank(rank + 1),
-            )
-        } else {
-            // On first process insert at the beginning the first possible
-            // box in the region and receive the key from next process.
-            let first_key = *linearized_keys.first().unwrap();
-            let deepest_first = MortonKey::deepest_first();
-            if !first_key.is_ancestor(deepest_first) {
-                let ancestor = deepest_first.finest_common_ancestor(first_key);
-                linearized_keys.insert(0, ancestor.children()[0]);
-            }
-
-            comm.process_at_rank(1).receive::<MortonKey>()
-        };
-        // If we are not at the last process we need to introduce the received key
-        // into our list.
-        linearized_keys.push(other);
-    };
+    }
 
     // Now complete the regions defined by the keys on each process.
 
