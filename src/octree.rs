@@ -7,7 +7,7 @@ use crate::{
     geometry::PhysicalBox,
     morton::MortonKey,
     parsort::parsort,
-    tools::{communicate_back, gather_to_all, redistribute},
+    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute},
 };
 
 use mpi::{
@@ -469,28 +469,15 @@ pub fn partition<C: CommunicatorCollectives>(
     // of each array to get the global sums and then we update the array of each rank
     // with the sum from the previous ranks.
 
-    let mut scan: Vec<usize> = weights
-        .iter()
-        .scan(0, |state, x| {
-            *state += *x;
-            Some(*state)
-        })
-        .collect_vec();
-    let scan_last = *scan.last().unwrap();
-    let mut scan_result: usize = 0;
-    comm.exclusive_scan_into(&scan_last, &mut scan_result, SystemOperation::sum());
-    for elem in &mut scan {
-        *elem += scan_result;
-    }
+    let scan = global_inclusive_cumsum(&weights, comm);
+
+    // Now broadcast the total weight to all processes.
 
     let mut total_weight = if rank == size - 1 {
         *scan.last().unwrap()
     } else {
         0
     };
-
-    // Scan the weight (form cumulative sums) and broadcast the total weight (last entry on last process)
-    // to all other processes.
 
     comm.process_at_rank(size - 1)
         .broadcast_into(&mut total_weight);

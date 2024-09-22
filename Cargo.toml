@@ -24,6 +24,7 @@ crate-type = ["cdylib", "lib"]
 itertools = "0.13.*"
 rand = { version = "0.8.5", features = ["alloc"] }
 rand_chacha = "0.3.*"
+num = "0.4.*"
 bytemuck = "1.*"
 vtkio = "0.6.*"
 mpi = {version = "0.8.*", features = ["derive", "user-operations"] }
