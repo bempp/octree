@@ -122,7 +122,7 @@ pub fn test_coarse_partition<R: Rng, C: CommunicatorCollectives>(rng: &mut R, co
 
     println!("Rank {} has {} keys. ", rank, keys.len());
 
-    let partitioned_tree = block_partition(&keys, rng, comm);
+    let partitioned_tree = block_partition(&keys, comm);
 
     println!(
         "Partitioned tree on rank {} has {} keys.",

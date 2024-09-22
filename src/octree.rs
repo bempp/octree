@@ -127,30 +127,27 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
     (keys, bounding_box)
 }
 
-/// Block partition of tree.
-///
-/// Returns a tuple `(partitioned_keys, coarse_keys)` of the partitioned
-/// keys and the associated coarse keys.
-/// A necessary condition for the block partitioning is that
-// all sorted keys are on the same level.
-pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
-    sorted_keys: &[MortonKey],
-    rng: &mut R,
+/// Take a linear sequence of Morton keys and compute a complete linear associated coarse tree.
+pub fn compute_coarse_tree<C: CommunicatorCollectives>(
+    linear_keys: &[MortonKey],
     comm: &C,
-) -> (Vec<MortonKey>, Vec<MortonKey>) {
-    let rank = comm.rank();
-    if comm.size() == 1 {
-        // On a single node block partitioning should not do anything.
-        return (sorted_keys.to_vec(), vec![MortonKey::root()]);
+) -> Vec<MortonKey> {
+    let size = comm.size();
+
+    debug_assert!(is_linear_tree(linear_keys, comm));
+
+    // On a single node a complete coarse tree is simply the root.
+    if size == 1 {
+        return vec![MortonKey::root()];
     }
 
-    let mut completed_region = sorted_keys
+    let mut completed_region = linear_keys
         .first()
         .unwrap()
-        .fill_between_keys(*sorted_keys.last().unwrap());
+        .fill_between_keys(*linear_keys.last().unwrap());
 
-    completed_region.insert(0, *sorted_keys.first().unwrap());
-    completed_region.push(*sorted_keys.last().unwrap());
+    completed_region.insert(0, *linear_keys.first().unwrap());
+    completed_region.push(*linear_keys.last().unwrap());
 
     // Get the smallest level members of the completed region.
 
@@ -169,7 +166,28 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
         .copied()
         .collect_vec();
 
-    let coarse_tree = complete_tree(&largest_boxes, rng, comm);
+    debug_assert!(is_linear_tree(&largest_boxes, comm));
+
+    complete_tree(&largest_boxes, comm)
+}
+
+/// Block partition of tree.
+///
+/// Returns a tuple `(partitioned_keys, coarse_keys)` of the partitioned
+/// keys and the associated coarse keys.
+/// A necessary condition for the block partitioning is that
+// all sorted keys are on the same level.
+pub fn block_partition<C: CommunicatorCollectives>(
+    linear_keys: &[MortonKey],
+    comm: &C,
+) -> (Vec<MortonKey>, Vec<MortonKey>) {
+    let rank = comm.rank();
+    if comm.size() == 1 {
+        // On a single node block partitioning should not do anything.
+        return (linear_keys.to_vec(), vec![MortonKey::root()]);
+    }
+
+    let coarse_tree = compute_coarse_tree(&linear_keys, comm);
 
     // We want to partition the coarse tree. But we need the correct weights. The idea
     // is that we use the number of original leafs that intersect with the coarse tree
@@ -195,7 +213,7 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     // Let's find the start of our region. The start of our region is a coarse key that is an ancestor
     // of our current key. This works because the coarse tree has levels at most as high as the sorted keys.
 
-    let first_key = *sorted_keys.first().unwrap();
+    let first_key = *linear_keys.first().unwrap();
 
     let first_coarse_index = global_coarse_tree
         .iter()
@@ -204,7 +222,7 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
 
     // Now we need to find the end index of our region. For this again we find the index of our coarse tree that
     // is an ancestor of our last key.
-    let last_key = *sorted_keys.last().unwrap();
+    let last_key = *linear_keys.last().unwrap();
 
     let last_coarse_index = global_coarse_tree
         .iter()
@@ -218,7 +236,7 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
         local_weights[first_coarse_index..=last_coarse_index].iter_mut(),
         global_coarse_tree[first_coarse_index..=last_coarse_index].iter()
     ) {
-        *w += sorted_keys
+        *w += linear_keys
             .iter()
             .filter(|&&key| global_coarse_key.is_ancestor(key))
             .count();
@@ -246,7 +264,7 @@ pub fn block_partition<R: Rng, C: CommunicatorCollectives>(
     let coarse_tree = partition(&coarse_tree, &weights, comm);
 
     (
-        redistribute_with_respect_to_coarse_tree(&sorted_keys, &coarse_tree, comm),
+        redistribute_with_respect_to_coarse_tree(&linear_keys, &coarse_tree, comm),
         coarse_tree,
     )
 
@@ -529,19 +547,20 @@ pub fn partition<C: CommunicatorCollectives>(
     recvbuffer
 }
 
-/// Given a distributed set of keys, generate a complete linear Octree.
-pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
-    keys: &[MortonKey],
-    rng: &mut R,
+/// Given a distributed set of linear keys, generate a complete tree.
+pub fn complete_tree<C: CommunicatorCollectives>(
+    linear_keys: &[MortonKey],
     comm: &C,
 ) -> Vec<MortonKey> {
-    let mut linearized_keys = linearize(keys, rng, comm);
+    let mut linear_keys = linear_keys.to_vec();
+
+    debug_assert!(is_linear_tree(&linear_keys, comm));
 
     let size = comm.size();
     let rank = comm.rank();
 
     if size == 1 {
-        return MortonKey::complete_tree(linearized_keys.as_slice());
+        return MortonKey::complete_tree(linear_keys.as_slice());
     }
 
     // Now insert on the first and last process the first and last child of the
@@ -552,29 +571,29 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
     // ancestor of the deepest first key and first element. Correspondingly on the last process
     // we need to insert the last child of the finest ancester of the deepest last key and last element.
 
-    let next_key = communicate_back(&linearized_keys, comm);
+    let next_key = communicate_back(&linear_keys, comm);
 
     if rank < size - 1 {
-        linearized_keys.push(next_key.unwrap());
+        linear_keys.push(next_key.unwrap());
     }
 
     // Now fix the first key on the first rank.
 
     if rank == 0 {
-        let first_key = linearized_keys.first().unwrap();
+        let first_key = linear_keys.first().unwrap();
         let deepest_first = MortonKey::deepest_first();
         if !first_key.is_ancestor(deepest_first) {
             let ancestor = deepest_first.finest_common_ancestor(*first_key);
-            linearized_keys.insert(0, ancestor.children()[0]);
+            linear_keys.insert(0, ancestor.children()[0]);
         }
     }
 
     if rank == size - 1 {
-        let last_key = linearized_keys.last().unwrap();
+        let last_key = linear_keys.last().unwrap();
         let deepest_last = MortonKey::deepest_last();
         if !last_key.is_ancestor(deepest_last) {
             let ancestor = deepest_last.finest_common_ancestor(*last_key);
-            linearized_keys.push(ancestor.children()[NSIBLINGS - 1]);
+            linear_keys.push(ancestor.children()[NSIBLINGS - 1]);
         }
     }
 
@@ -582,16 +601,53 @@ pub fn complete_tree<R: Rng, C: CommunicatorCollectives>(
 
     let mut result = Vec::<MortonKey>::new();
 
-    for (&key1, &key2) in linearized_keys.iter().tuple_windows() {
+    for (&key1, &key2) in linear_keys.iter().tuple_windows() {
         result.push(key1);
         result.extend_from_slice(key1.fill_between_keys(key2).as_slice());
     }
 
     if rank == size - 1 {
-        result.push(*linearized_keys.last().unwrap());
+        result.push(*linear_keys.last().unwrap());
     }
 
+    debug_assert!(is_complete_linear_tree(&result, comm));
+
     result
+}
+
+/// Return true if the keys are linear.
+pub fn is_linear_tree<C: CommunicatorCollectives>(arr: &[MortonKey], comm: &C) -> bool {
+    let mut is_linear = true;
+
+    for (&key1, &key2) in arr.iter().tuple_windows() {
+        if key1 >= key2 || key1.is_ancestor(key2) {
+            is_linear = false;
+            break;
+        }
+    }
+
+    if comm.size() == 1 {
+        return is_linear;
+    }
+
+    // Now check the interfaces
+
+    if let Some(next_key) = communicate_back(arr, comm) {
+        let last = *arr.last().unwrap();
+        if last >= next_key || last.is_ancestor(next_key) {
+            is_linear = false;
+        }
+    }
+
+    let mut global_is_linear = false;
+
+    comm.all_reduce_into(
+        &is_linear,
+        &mut global_is_linear,
+        SystemOperation::logical_and(),
+    );
+
+    global_is_linear
 }
 
 /// Return true on all ranks if distributed tree is complete. Otherwise, return false.

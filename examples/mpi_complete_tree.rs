@@ -2,7 +2,7 @@
 
 use bempp_octree::{
     constants::DEEPEST_LEVEL,
-    octree::{complete_tree, is_complete_linear_tree, points_to_morton},
+    octree::{complete_tree, is_complete_linear_tree, linearize, points_to_morton},
 };
 use mpi::traits::*;
 use rand::prelude::*;
@@ -32,14 +32,12 @@ pub fn main() {
     // Compute the Morton keys on the deepest level
     let (keys, _) = points_to_morton(&points, DEEPEST_LEVEL as usize, &comm);
 
-    assert!(!is_complete_linear_tree(&keys, &comm));
+    let linear_keys = linearize(&keys, &mut rng, &comm);
 
     // Generate a complete tree
-    let distributed_complete_tree = complete_tree(&keys, &mut rng, &comm);
+    let distributed_complete_tree = complete_tree(&linear_keys, &comm);
 
-    let is_complete_linear = is_complete_linear_tree(&distributed_complete_tree, &comm);
-
-    assert!(is_complete_linear);
+    assert!(is_complete_linear_tree(&distributed_complete_tree, &comm));
 
     if comm.rank() == 0 {
         println!("Distributed tree is complete and linear.");
