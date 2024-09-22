@@ -1,11 +1,16 @@
 //! Parallel Octree structure
 
+use std::collections::HashSet;
+
 use crate::{
     constants::{DEEPEST_LEVEL, NSIBLINGS},
     geometry::PhysicalBox,
     morton::MortonKey,
     parsort::parsort,
-    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute, sort_to_bins},
+    tools::{
+        communicate_back, gather_to_all, gather_to_root, global_inclusive_cumsum, redistribute,
+        sort_to_bins,
+    },
 };
 
 use mpi::traits::Root;
@@ -553,6 +558,64 @@ pub fn complete_tree<C: CommunicatorCollectives>(
     result
 }
 
+/// Balance a distributed tree.
+pub fn balance<R: Rng, C: CommunicatorCollectives>(
+    linear_keys: &[MortonKey],
+    rng: &mut R,
+    comm: &C,
+) -> Vec<MortonKey> {
+    let deepest_level = deepest_level(linear_keys, comm);
+
+    // Start with keys at deepest level
+    let mut work_list = linear_keys
+        .iter()
+        .copied()
+        .filter(|&key| key.level() == deepest_level)
+        .collect_vec();
+
+    let mut result = Vec::<MortonKey>::new();
+
+    // Now go through and make sure that for each key siblings and neighbours of parents are added
+
+    for level in (1..=deepest_level).rev() {
+        let mut parents = HashSet::<MortonKey>::new();
+        let mut new_work_list = Vec::<MortonKey>::new();
+        // We filter the work list by level and also make sure that
+        // only one sibling of each of the parents children is added to
+        // our current level list.
+        for key in work_list.iter() {
+            let parent = key.parent();
+            if !parents.contains(&parent) {
+                parents.insert(parent);
+                result.extend_from_slice(key.siblings().as_slice());
+                new_work_list.extend_from_slice(
+                    parent
+                        .neighbours()
+                        .iter()
+                        .copied()
+                        .filter(|&key| key.is_valid())
+                        .collect_vec()
+                        .as_slice(),
+                );
+            }
+        }
+        new_work_list.extend(
+            linear_keys
+                .iter()
+                .copied()
+                .filter(|&key| key.level() == level - 1),
+        );
+
+        work_list = new_work_list;
+        // Now extend the work list with the
+    }
+
+    let result = linearize(&result, rng, comm);
+
+    debug_assert!(is_complete_linear_and_balanced(&result, comm));
+    result
+}
+
 /// Return true if the keys are linear.
 pub fn is_linear_tree<C: CommunicatorCollectives>(arr: &[MortonKey], comm: &C) -> bool {
     let mut is_linear = true;
@@ -675,4 +738,22 @@ pub fn deepest_level<C: CommunicatorCollectives>(keys: &[MortonKey], comm: &C) -
     );
 
     global_deepest_level
+}
+
+/// Check if tree is balanced.
+pub fn is_complete_linear_and_balanced<C: CommunicatorCollectives>(
+    arr: &[MortonKey],
+    comm: &C,
+) -> bool {
+    // Send the tree to the root node and check there that it is balanced.
+
+    let mut balanced = false;
+
+    if let Some(arr) = gather_to_root(arr, comm) {
+        balanced = MortonKey::is_complete_linear_and_balanced(&arr);
+    }
+
+    comm.process_at_rank(0).broadcast_into(&mut balanced);
+
+    balanced
 }

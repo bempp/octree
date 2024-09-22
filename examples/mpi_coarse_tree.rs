@@ -3,7 +3,7 @@
 use bempp_octree::{
     constants::DEEPEST_LEVEL,
     octree::{
-        complete_tree, compute_coarse_tree, compute_coarse_tree_weights, create_local_tree,
+        balance, compute_coarse_tree, compute_coarse_tree_weights, create_local_tree,
         is_complete_linear_tree, linearize, load_balance, points_to_morton,
         redistribute_with_respect_to_coarse_tree,
     },
@@ -94,12 +94,18 @@ pub fn main() {
     let refined_tree =
         create_local_tree(&load_balanced_fine_keys, &load_balanced_coarse_keys, 6, 100);
 
-    if comm.rank() == 0 {
-        println!("Coarse tree has {} keys.", load_balanced_coarse_keys.len());
-        println!("Refined tree has {} keys.", refined_tree.len());
-    }
-
     assert!(is_complete_linear_tree(&refined_tree, &comm));
+
+    // Now balance the tree.
+
+    let balanced_tree = balance(&refined_tree, &mut rng, &comm);
+
+    // redistribute the balanced tree according to coarse tree
+
+    let balanced_tree =
+        redistribute_with_respect_to_coarse_tree(&balanced_tree, &load_balanced_coarse_keys, &comm);
+
+    assert!(is_complete_linear_tree(&balanced_tree, &comm));
 
     if comm.rank() == 1 {
         println!("Coarse tree successfully created and weights computed.");

@@ -389,6 +389,10 @@ impl MortonKey {
         let mut result = [MortonKey::default(); 26];
 
         let (level, [x, y, z]) = self.decode();
+
+        if level == 0 {
+            return result;
+        }
         let level_size = 1 << level;
 
         for (direction, res) in izip!(DIRECTIONS, result.iter_mut()) {
