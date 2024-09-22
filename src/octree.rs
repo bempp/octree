@@ -316,6 +316,7 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 ///
 /// The coarse keys are refined until the maximum level is reached or until each coarse key
 /// is the ancestor of at most `max_keys` fine keys.
+/// It is assumed that the level of the fine keys is at least as large as `max_level`.
 pub fn create_local_tree(
     sorted_fine_keys: &[MortonKey],
     coarse_keys: &[MortonKey],
@@ -327,8 +328,7 @@ pub fn create_local_tree(
     }
 
     // We split the sorted fine keys into subslices so that each subslice
-    // is associated with a coarse slice. For this we need to add an upper bound
-    // coarse keys to ensure that we have suitable bins.
+    // is associated with a coarse slice.
 
     let bins = coarse_keys.to_vec();
 
@@ -412,6 +412,8 @@ pub fn linearize<R: Rng, C: CommunicatorCollectives>(
             result.push(last);
         }
     }
+
+    debug_assert!(is_linear_tree(&result, comm));
 
     result
 }
@@ -654,4 +656,23 @@ pub fn is_complete_linear_tree<C: CommunicatorCollectives>(arr: &[MortonKey], co
     );
 
     result
+}
+
+/// Return the deepest level of a distributed list of Morton keys.
+pub fn deepest_level<C: CommunicatorCollectives>(keys: &[MortonKey], comm: &C) -> usize {
+    let local_deepest_level = keys.iter().map(|elem| elem.level()).max().unwrap();
+
+    if comm.size() == 1 {
+        return local_deepest_level;
+    }
+
+    let mut global_deepest_level: usize = 0;
+
+    comm.all_reduce_into(
+        &local_deepest_level,
+        &mut global_deepest_level,
+        SystemOperation::max(),
+    );
+
+    global_deepest_level
 }
