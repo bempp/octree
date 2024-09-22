@@ -1,8 +1,7 @@
 //! Testing the hyksort component.
 use bempp_octree::constants::{DEEPEST_LEVEL, LEVEL_SIZE};
 use bempp_octree::morton::MortonKey;
-use bempp_octree::octree::{block_partition, linearize, partition};
-use bempp_octree::parsort::parsort;
+use bempp_octree::octree::{block_partition, linearize};
 use bempp_octree::tools::gather_to_root;
 use itertools::{izip, Itertools};
 use mpi::traits::*;

@@ -3,13 +3,9 @@
 use itertools::{izip, Itertools};
 use mpi::{
     collective::{SystemOperation, UserOperation},
-    datatype::{DynBuffer, Partition, PartitionMut},
+    datatype::{Partition, PartitionMut},
     point_to_point as p2p,
-    raw::AsRaw,
-    traits::{
-        AsDatatype, CommunicatorCollectives, Destination, Equivalence, PartitionedBuffer,
-        PartitionedBufferMut, Root, Source,
-    },
+    traits::{CommunicatorCollectives, Destination, Equivalence, Root, Source},
 };
 use num::traits::Zero;
 use rand::Rng;

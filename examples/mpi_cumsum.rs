@@ -1,10 +1,6 @@
 //! Test the computation of a global bounding box across MPI ranks.
 
-use bempp_octree::{
-    geometry::PhysicalBox,
-    octree::compute_global_bounding_box,
-    tools::{gather_to_root, global_inclusive_cumsum},
-};
+use bempp_octree::tools::{gather_to_root, global_inclusive_cumsum};
 use itertools::{izip, Itertools};
 use mpi::traits::*;
 use rand::prelude::*;

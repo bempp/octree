@@ -2,11 +2,7 @@
 
 use bempp_octree::{
     constants::DEEPEST_LEVEL,
-    geometry::PhysicalBox,
-    octree::{
-        complete_tree, compute_global_bounding_box, is_complete_linear_tree, points_to_morton,
-    },
-    tools::gather_to_root,
+    octree::{complete_tree, is_complete_linear_tree, points_to_morton},
 };
 use mpi::traits::*;
 use rand::prelude::*;
