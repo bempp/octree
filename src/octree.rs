@@ -128,6 +128,7 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
 }
 
 /// Take a linear sequence of Morton keys and compute a complete linear associated coarse tree.
+/// The returned coarse tree is load balanced according to the number of linear keys in each coarse block.
 pub fn compute_coarse_tree<C: CommunicatorCollectives>(
     linear_keys: &[MortonKey],
     comm: &C,
@@ -171,24 +172,13 @@ pub fn compute_coarse_tree<C: CommunicatorCollectives>(
     complete_tree(&largest_boxes, comm)
 }
 
-/// Block partition of tree.
-///
-/// Returns a tuple `(partitioned_keys, coarse_keys)` of the partitioned
-/// keys and the associated coarse keys.
-/// A necessary condition for the block partitioning is that
-// all sorted keys are on the same level.
-pub fn block_partition<C: CommunicatorCollectives>(
+/// Compute the weights of each coarse tree block as the number of linear keys associated with each coarse block.
+pub fn compute_coarse_tree_weights<C: CommunicatorCollectives>(
     linear_keys: &[MortonKey],
+    coarse_tree: &[MortonKey],
     comm: &C,
-) -> (Vec<MortonKey>, Vec<MortonKey>) {
+) -> Vec<usize> {
     let rank = comm.rank();
-    if comm.size() == 1 {
-        // On a single node block partitioning should not do anything.
-        return (linear_keys.to_vec(), vec![MortonKey::root()]);
-    }
-
-    let coarse_tree = compute_coarse_tree(&linear_keys, comm);
-
     // We want to partition the coarse tree. But we need the correct weights. The idea
     // is that we use the number of original leafs that intersect with the coarse tree
     // as leafs. In order to compute this we send the coarse tree around to all processes
@@ -204,7 +194,7 @@ pub fn block_partition<C: CommunicatorCollectives>(
     let coarse_tree_ranks = gather_to_all(&vec![rank as usize; coarse_tree.len()], comm);
 
     // We now compute the local weights.
-    let mut local_weights = vec![0 as usize; global_coarse_tree.len()];
+    let mut local_weight_contribution = vec![0 as usize; global_coarse_tree.len()];
 
     // In the following loop we want to be a bit smart. We do not iterate through all the local elements.
     // We know that our keys are sorted and also that the coarse tree keys are sorted. So we find the region
@@ -233,7 +223,7 @@ pub fn block_partition<C: CommunicatorCollectives>(
     // In the way we have computed the indices. The last coarse index is inclusive (it is the ancestor of our last key).
 
     for (w, &global_coarse_key) in izip!(
-        local_weights[first_coarse_index..=last_coarse_index].iter_mut(),
+        local_weight_contribution[first_coarse_index..=last_coarse_index].iter_mut(),
         global_coarse_tree[first_coarse_index..=last_coarse_index].iter()
     ) {
         *w += linear_keys
@@ -244,14 +234,18 @@ pub fn block_partition<C: CommunicatorCollectives>(
 
     // We now need to sum up the weights across all processes.
 
-    let mut weights = vec![0 as usize; global_coarse_tree.len()];
+    let mut global_weights = vec![0 as usize; global_coarse_tree.len()];
 
-    comm.all_reduce_into(&local_weights, &mut weights, SystemOperation::sum());
+    comm.all_reduce_into(
+        &local_weight_contribution,
+        &mut global_weights,
+        SystemOperation::sum(),
+    );
 
     // Each process now has all weights. However, we only need the ones for the current process.
     // So we just filter the rest out.
 
-    let weights = izip!(coarse_tree_ranks, weights)
+    izip!(coarse_tree_ranks, global_weights)
         .filter_map(|(r, weight)| {
             if r == rank as usize {
                 Some(weight)
@@ -259,28 +253,19 @@ pub fn block_partition<C: CommunicatorCollectives>(
                 None
             }
         })
-        .collect_vec();
-
-    let coarse_tree = partition(&coarse_tree, &weights, comm);
-
-    (
-        redistribute_with_respect_to_coarse_tree(&linear_keys, &coarse_tree, comm),
-        coarse_tree,
-    )
-
-    // We now need to redistribute the global tree according to the coarse tree.
+        .collect_vec()
 }
 
 /// Redistribute sorted keys with respect to a linear coarse tree.
 pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
-    sorted_keys: &[MortonKey],
+    linear_keys: &[MortonKey],
     coarse_tree: &[MortonKey],
     comm: &C,
 ) -> Vec<MortonKey> {
     let size = comm.size();
 
     if size == 1 {
-        return sorted_keys.to_vec();
+        return linear_keys.to_vec();
     }
 
     // We want to globally redistribute keys so that the keys on each process are descendents
@@ -301,51 +286,31 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 
     // This will store for each rank how many keys will be assigned to it.
 
-    let rank_counts = sort_to_bins(sorted_keys, &global_bins)
+    let rank_counts = sort_to_bins(linear_keys, &global_bins)
         .iter()
         .map(|&elem| elem as i32)
         .collect_vec();
 
     // We now have the counts for each rank. Let's redistribute accordingly and return.
 
-    redistribute(&sorted_keys, &rank_counts, comm)
+    let result = redistribute(&linear_keys, &rank_counts, comm);
+
+    #[cfg(debug_assertions)]
+    {
+        // Check through that the first and last key of result are descendents
+        // of the first and last coarse bloack.
+        debug_assert!(coarse_tree
+            .first()
+            .unwrap()
+            .is_ancestor(*result.first().unwrap()));
+        debug_assert!(coarse_tree
+            .last()
+            .unwrap()
+            .is_ancestor(*result.last().unwrap()));
+    }
+
+    result
 }
-
-// /// Create bins from sorted keys.
-// pub fn sort_to_bins(sorted_keys: &[MortonKey], bins: &[MortonKey]) -> Vec<usize> {
-//     let mut bin_counts = vec![0 as usize; bins.len() - 1];
-
-//     // This iterates over each possible bin and returns also the associated rank.
-//     let mut bin_iter = izip!(
-//         bin_counts.iter_mut(),
-//         bins.iter().tuple_windows::<(&MortonKey, &MortonKey)>(),
-//     );
-
-//     // We take the first element of the bin iterator. There will always be at least one.
-//     let mut r: &mut usize;
-//     let mut bin_start: &MortonKey;
-//     let mut bin_end: &MortonKey;
-//     (r, (bin_start, bin_end)) = bin_iter.next().unwrap();
-
-//     for &key in sorted_keys.iter() {
-//         if *bin_start <= key && key < *bin_end {
-//             *r += 1;
-//         } else {
-//             // Move the bin forward until it fits. There will always be a fitting bin.
-//             while let Some((rn, (bsn, ben))) = bin_iter.next() {
-//                 if *bsn <= key && key < *ben {
-//                     *rn += 1;
-//                     r = rn;
-//                     bin_start = bsn;
-//                     bin_end = ben;
-//                     break;
-//                 }
-//             }
-//         }
-//     }
-
-//     bin_counts
-// }
 
 /// Return a complete tree generated from local keys and associated coarse keys.
 ///
@@ -394,7 +359,7 @@ pub fn create_local_tree(
         }
     }
 
-    new_coarse_keys.to_vec()
+    new_coarse_keys
 }
 
 /// Linearize a set of weighted Morton keys.
@@ -452,7 +417,7 @@ pub fn linearize<R: Rng, C: CommunicatorCollectives>(
 }
 
 /// Balance a sorted list of Morton keys across processors given an array of corresponding weights.
-pub fn partition<C: CommunicatorCollectives>(
+pub fn load_balance<C: CommunicatorCollectives>(
     sorted_keys: &[MortonKey],
     weights: &[usize],
     comm: &C,
@@ -507,35 +472,6 @@ pub fn partition<C: CommunicatorCollectives>(
         .iter()
         .map(|elem| *elem as i32)
         .collect_vec();
-
-    // for p in 1..=size as usize {
-    //     let q = if p <= k as usize {
-    //         izip!(sorted_keys, &scan)
-    //             .filter_map(|(&key, &s)| {
-    //                 if ((p - 1) * (1 + w) <= s && s < p * (w + 1))
-    //                     || (p == size as usize && (p - 1) * (1 + w) <= s)
-    //                 {
-    //                     Some(key)
-    //                 } else {
-    //                     None
-    //                 }
-    //             })
-    //             .collect_vec()
-    //     } else {
-    //         izip!(sorted_keys, &scan)
-    //             .filter_map(|(&key, &s)| {
-    //                 if ((p - 1) * w + k <= s && s < p * w + k)
-    //                     || (p == size as usize && (p - 1) * w + k <= s)
-    //                 {
-    //                     Some(key)
-    //                 } else {
-    //                     None
-    //                 }
-    //             })
-    //             .collect_vec()
-    //     };
-    //     hash_map.insert(p - 1, q);
-    // }
 
     // Now distribute the data with an all to all v.
     // We create a vector of how many elements to send to each process and
