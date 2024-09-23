@@ -5,7 +5,7 @@ use crate::constants::{
     LEVEL_SIZE, NINE_BIT_MASK, NSIBLINGS, X_LOOKUP_DECODE, X_LOOKUP_ENCODE, Y_LOOKUP_DECODE,
     Y_LOOKUP_ENCODE, Z_LOOKUP_DECODE, Z_LOOKUP_ENCODE,
 };
-use crate::geometry::PhysicalBox;
+use crate::geometry::{PhysicalBox, Point};
 use itertools::izip;
 use itertools::Itertools;
 use mpi::traits::Equivalence;
@@ -155,9 +155,9 @@ impl MortonKey {
 
     /// Map a physical point within a bounding box to a Morton key on a given level.
     /// It is assumed that points are strictly contained within the bounding box.
-    pub fn from_physical_point(point: [f64; 3], bounding_box: &PhysicalBox, level: usize) -> Self {
+    pub fn from_physical_point(point: Point, bounding_box: &PhysicalBox, level: usize) -> Self {
         let level_size = 1 << level;
-        let reference = bounding_box.physical_to_reference(point);
+        let reference = bounding_box.physical_to_reference(point.coords());
         let x = (reference[0] * level_size as f64) as usize;
         let y = (reference[1] * level_size as f64) as usize;
         let z = (reference[2] * level_size as f64) as usize;
@@ -1284,7 +1284,7 @@ mod test {
     pub fn test_from_physical_point() {
         let bounding_box = PhysicalBox::new([-2.0, -3.0, -1.0, 4.0, 5.0, 6.0]);
 
-        let point = [1.5, -2.5, 5.0];
+        let point = Point::new([1.5, -2.5, 5.0], 0);
         let level = 10;
 
         let key = MortonKey::from_physical_point(point, &bounding_box, level);
@@ -1293,9 +1293,9 @@ mod test {
 
         let coords = physical_box.coordinates();
 
-        assert!(coords[0] <= point[0] && point[0] < coords[3]);
-        assert!(coords[1] <= point[1] && point[1] < coords[4]);
-        assert!(coords[2] <= point[2] && point[2] < coords[5]);
+        assert!(coords[0] <= point.coords()[0] && point.coords()[0] < coords[3]);
+        assert!(coords[1] <= point.coords()[1] && point.coords()[1] < coords[4]);
+        assert!(coords[2] <= point.coords()[2] && point.coords()[2] < coords[5]);
 
         // Now compute the box.
     }

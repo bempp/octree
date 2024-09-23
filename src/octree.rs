@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::{
     constants::{DEEPEST_LEVEL, NSIBLINGS},
-    geometry::PhysicalBox,
+    geometry::{PhysicalBox, Point},
     morton::MortonKey,
     parsort::parsort,
     tools::{
@@ -21,12 +21,10 @@ use rand::Rng;
 
 /// Compute the global bounding box across all points on all processes.
 pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
-    points: &[f64],
+    points: &[Point],
     comm: &C,
 ) -> PhysicalBox {
     // Make sure that the points array is a multiple of 3.
-    assert_eq!(points.len() % 3, 0);
-    let points: &[[f64; 3]] = bytemuck::cast_slice(points);
 
     // Now compute the minimum and maximum across each dimension.
 
@@ -40,9 +38,9 @@ pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
     let mut zmax = f64::MIN;
 
     for point in points {
-        let x = point[0];
-        let y = point[1];
-        let z = point[2];
+        let x = point.coords()[0];
+        let y = point.coords()[1];
+        let z = point.coords()[2];
 
         xmin = f64::min(xmin, x);
         xmax = f64::max(xmax, x);
@@ -102,13 +100,10 @@ pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
 
 /// Convert points to Morton keys on specified level.
 pub fn points_to_morton<C: CommunicatorCollectives>(
-    points: &[f64],
+    points: &[Point],
     max_level: usize,
     comm: &C,
 ) -> (Vec<MortonKey>, PhysicalBox) {
-    // Make sure that the points array is a multiple of 3.
-    assert_eq!(points.len() % 3, 0);
-
     // Make sure that max level never exceeds DEEPEST_LEVEL
     let max_level = if max_level > DEEPEST_LEVEL as usize {
         DEEPEST_LEVEL as usize
@@ -121,8 +116,6 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
     let bounding_box = compute_global_bounding_box(points, comm);
 
     // Bunch the points in arrays of 3.
-
-    let points: &[[f64; 3]] = bytemuck::cast_slice(points);
 
     let keys = points
         .iter()
@@ -649,6 +642,70 @@ pub fn is_linear_tree<C: CommunicatorCollectives>(arr: &[MortonKey], comm: &C) -
     );
 
     global_is_linear
+}
+
+/// Redistribute points with respect to a given coarse tree
+pub fn redistribute_points_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
+    points: &[Point],
+    morton_keys_for_points: &[MortonKey],
+    coarse_tree: &[MortonKey],
+    comm: &C,
+) -> (Vec<Point>, Vec<MortonKey>) {
+    pub fn argsort<T: Ord + Copy>(arr: &[T]) -> Vec<usize> {
+        let mut sort_indices = (0..arr.len()).collect_vec();
+        sort_indices.sort_unstable_by_key(|&index| arr[index]);
+        sort_indices
+    }
+
+    pub fn reorder<T: Copy>(arr: &[T], permutation: &[usize]) -> Vec<T> {
+        let mut reordered = Vec::<T>::with_capacity(arr.len());
+        for &index in permutation.iter() {
+            reordered.push(arr[index])
+        }
+        reordered
+    }
+
+    assert_eq!(points.len(), morton_keys_for_points.len());
+
+    let size = comm.size();
+
+    if size == 1 {
+        return (points.to_vec(), morton_keys_for_points.to_vec());
+    }
+
+    let sort_indices = argsort(&morton_keys_for_points);
+    let sorted_keys = reorder(&morton_keys_for_points, &sort_indices);
+    let sorted_points = reorder(&points, &sort_indices);
+
+    // Now get the bins
+
+    let my_first = coarse_tree.first().unwrap();
+
+    let global_bins = gather_to_all(std::slice::from_ref(my_first), comm);
+
+    // We now sort the morton indices into the bins.
+
+    // This will store for each rank how many keys will be assigned to it.
+
+    let counts = sort_to_bins(&sorted_keys, &global_bins)
+        .iter()
+        .map(|&elem| elem as i32)
+        .collect_vec();
+
+    // We now redistribute the points and the corresponding keys.
+
+    let (distributed_points, distributed_keys) = (
+        redistribute(&sorted_points, &counts, comm),
+        redistribute(&sorted_keys, &counts, comm),
+    );
+
+    // Now sort the distributed points and keys internally again.
+
+    let sort_indices = argsort(&distributed_keys);
+    let sorted_keys = reorder(&distributed_keys, &sort_indices);
+    let sorted_points = reorder(&distributed_points, &sort_indices);
+
+    (sorted_points, sorted_keys)
 }
 
 /// Return true on all ranks if distributed tree is complete. Otherwise, return false.

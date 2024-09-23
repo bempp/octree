@@ -3,6 +3,7 @@
 use bempp_octree::{
     constants::DEEPEST_LEVEL,
     octree::{complete_tree, is_complete_linear_tree, linearize, points_to_morton},
+    tools::generate_random_points,
 };
 use mpi::traits::*;
 use rand::prelude::*;
@@ -23,11 +24,7 @@ pub fn main() {
 
     // Generate random points.
 
-    let mut points = Vec::<f64>::with_capacity(3 * npoints);
-
-    for _ in 0..3 * npoints {
-        points.push(rng.gen());
-    }
+    let points = generate_random_points(npoints, &mut rng, &comm);
 
     // Compute the Morton keys on the deepest level
     let (keys, _) = points_to_morton(&points, DEEPEST_LEVEL as usize, &comm);

@@ -12,6 +12,7 @@ use rand::Rng;
 
 use crate::{
     constants::{DEEPEST_LEVEL, LEVEL_SIZE},
+    geometry::Point,
     morton::MortonKey,
 };
 
@@ -370,6 +371,25 @@ pub fn generate_random_keys<R: Rng>(nkeys: usize, rng: &mut R) -> Vec<MortonKey>
     }
 
     result
+}
+
+/// Generate random points for testing.
+pub fn generate_random_points<R: Rng, C: CommunicatorCollectives>(
+    npoints: usize,
+    rng: &mut R,
+    comm: &C,
+) -> Vec<Point> {
+    let mut points = Vec::<Point>::with_capacity(npoints);
+    let rank = comm.rank() as usize;
+
+    for index in 0..npoints {
+        points.push(Point::new(
+            [rng.gen(), rng.gen(), rng.gen()],
+            npoints * rank + index,
+        ));
+    }
+
+    points
 }
 
 /// Compute displacements from a vector of counts.

@@ -1,7 +1,9 @@
 //! Test the computation of a global bounding box across MPI ranks.
 
 use bempp_octree::{
-    geometry::PhysicalBox, octree::compute_global_bounding_box, tools::gather_to_root,
+    geometry::PhysicalBox,
+    octree::compute_global_bounding_box,
+    tools::{gather_to_root, generate_random_points},
 };
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
@@ -21,11 +23,7 @@ pub fn main() {
 
     // Generate random points.
 
-    let mut points = Vec::<f64>::with_capacity(3 * npoints);
-
-    for _ in 0..3 * npoints {
-        points.push(rng.gen());
-    }
+    let points = generate_random_points(npoints, &mut rng, &comm);
 
     // Compute the distributed bounding box.
 

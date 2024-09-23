@@ -2,10 +2,9 @@
 
 use crate::{
     constants::{DEEPEST_LEVEL, NLEVELS},
-    geometry::PhysicalBox,
+    geometry::{PhysicalBox, Point},
     morton::MortonKey,
 };
-use bytemuck;
 use std::collections::HashMap;
 use vtkio;
 
@@ -22,7 +21,7 @@ pub struct Neighbour {
 /// An octree
 pub struct Octree {
     leaf_keys: Vec<MortonKey>,
-    points: Vec<[f64; 3]>,
+    points: Vec<Point>,
     point_to_level_keys: [Vec<MortonKey>; NLEVELS],
     bounding_box: PhysicalBox,
     key_counts: HashMap<MortonKey, usize>,
@@ -32,7 +31,7 @@ pub struct Octree {
 
 impl Octree {
     /// Create octress from points
-    pub fn from_points(points: &[f64], max_level: usize, max_points_per_box: usize) -> Self {
+    pub fn from_points(points: &[Point], max_level: usize, max_points_per_box: usize) -> Self {
         // Make sure that the points array is a multiple of 3.
         assert_eq!(points.len() % 3, 0);
 
@@ -49,7 +48,6 @@ impl Octree {
 
         // Bunch the points in arrays of 3.
 
-        let points: &[[f64; 3]] = bytemuck::cast_slice(points);
         let npoints = points.len();
 
         // We create a vector of keys for each point on each level. We compute the
@@ -160,7 +158,7 @@ impl Octree {
     }
 
     /// Points
-    pub fn points(&self) -> &Vec<[f64; 3]> {
+    pub fn points(&self) -> &Vec<Point> {
         &self.points
     }
 
@@ -264,14 +262,16 @@ impl Octree {
 
 #[cfg(test)]
 mod test {
+    use crate::geometry::Point;
+
     use super::Octree;
     use rand::prelude::*;
 
-    fn get_points_on_sphere(npoints: usize) -> Vec<f64> {
+    fn get_points_on_sphere(npoints: usize) -> Vec<Point> {
         let mut rng = rand::rngs::StdRng::seed_from_u64(0);
         let normal = rand_distr::Normal::new(0.0, 1.0).unwrap();
 
-        let mut points = Vec::<f64>::with_capacity(3 * npoints);
+        let mut points = Vec::<Point>::with_capacity(npoints);
         for _ in 0..(npoints) {
             let x: f64 = normal.sample(&mut rng);
             let y: f64 = normal.sample(&mut rng);
@@ -279,9 +279,7 @@ mod test {
 
             let norm = (x * x + y * y + z * z).sqrt();
 
-            points.push(x / norm);
-            points.push(y / norm);
-            points.push(z / norm);
+            points.push(Point::new([x / norm, y / norm, z / norm], 0));
         }
 
         points
