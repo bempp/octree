@@ -8,7 +8,8 @@ use mpi::{
     traits::{CommunicatorCollectives, Destination, Equivalence, Root, Source},
 };
 use num::traits::Zero;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 
 use crate::{
     constants::{DEEPEST_LEVEL, LEVEL_SIZE},
@@ -390,6 +391,11 @@ pub fn generate_random_points<R: Rng, C: CommunicatorCollectives>(
     }
 
     points
+}
+
+/// Get a seeded rng
+pub fn seeded_rng(seed: usize) -> ChaCha8Rng {
+    ChaCha8Rng::seed_from_u64(seed as u64)
 }
 
 /// Compute displacements from a vector of counts.

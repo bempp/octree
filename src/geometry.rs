@@ -43,8 +43,6 @@ impl PhysicalBox {
 
     /// Give a slice of points. Compute an associated bounding box.
     pub fn from_points(points: &[Point]) -> PhysicalBox {
-        assert_eq!(points.len() % 3, 0);
-
         let mut xmin = f64::MAX;
         let mut xmax = f64::MIN;
 

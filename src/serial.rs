@@ -33,7 +33,6 @@ impl Octree {
     /// Create octress from points
     pub fn from_points(points: &[Point], max_level: usize, max_points_per_box: usize) -> Self {
         // Make sure that the points array is a multiple of 3.
-        assert_eq!(points.len() % 3, 0);
 
         // Make sure that max level never exceeds DEEPEST_LEVEL
         let max_level = if max_level > DEEPEST_LEVEL as usize {
