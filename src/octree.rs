@@ -1,7 +1,7 @@
 pub mod parallel;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use mpi::traits::CommunicatorCollectives;
+use mpi::traits::{CommunicatorCollectives, Equivalence};
 pub use parallel::*;
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -10,7 +10,16 @@ use crate::{
     constants::DEEPEST_LEVEL,
     geometry::{PhysicalBox, Point},
     morton::MortonKey,
+    tools::gather_to_all,
 };
+
+#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+pub enum KeyStatus {
+    LocalLeaf,
+    LocalInterior,
+    Global,
+    Ghost(usize),
+}
 
 /// A general structure for octrees.
 pub struct Octree<'o, C> {
@@ -84,6 +93,8 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
 
         let coarse_tree_bounds = get_tree_bins(&coarse_tree, comm);
 
+        // Duplicate the coarse tree across all nodes
+
         Self {
             points: points.to_vec(),
             point_keys,
@@ -137,11 +148,85 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         self.comm
     }
 
-    pub fn generate_status(&self) {
-        let mut keys_with_status = HashSet::<MortonKey>::new();
+    /// Generate all leaf and interior keys.
+    pub fn generate_all_keys(&self) -> HashMap<MortonKey, KeyStatus> {
+        let rank = self.comm().rank() as usize;
+        let size = self.comm().size() as usize;
+
+        let mut all_keys = HashMap::<MortonKey, KeyStatus>::new();
 
         // Start from the leafs and work up the tree.
 
-        for leaf in self.leaf_tree() {}
+        // First deal with the parents of the coarse tree. These are different
+        // as they may exist on multiple nodes, so receive a different label.
+
+        let mut leaf_keys: HashSet<MortonKey> =
+            HashSet::from_iter(self.leaf_tree().iter().copied());
+
+        for &key in self.coarse_tree() {
+            // Need to distingush if coarse tree node is already a leaf or not.
+            if leaf_keys.contains(&key) {
+                all_keys.insert(key, KeyStatus::LocalLeaf);
+                leaf_keys.remove(&key);
+            } else {
+                all_keys.insert(key, KeyStatus::LocalInterior);
+            }
+
+            // We now iterate the parents of the coarse tree. There is no guarantee
+            // that the parents only exist on a single rank. Hence, they get the `Global`
+            // tag.
+
+            let mut parent = key.parent();
+            while parent.level() > 0 && !all_keys.contains_key(&parent) {
+                all_keys.insert(parent, KeyStatus::Global);
+                parent = parent.parent();
+            }
+        }
+
+        // We now deal with the fine leafs and their ancestors.
+
+        for leaf in leaf_keys {
+            debug_assert!(!all_keys.contains_key(&leaf));
+            all_keys.insert(leaf, KeyStatus::LocalLeaf);
+            let mut parent = leaf.parent();
+            while parent.level() > 0 && !all_keys.contains_key(&parent) {
+                all_keys.insert(parent, KeyStatus::LocalInterior);
+                parent = parent.parent();
+            }
+        }
+
+        // This maps from rank to the keys that we want to send to the ranks
+        let mut rank_key = HashMap::<usize, Vec<MortonKey>>::new();
+        for index in 0..size - 1 {
+            rank_key.insert(index, Vec::<MortonKey>::new());
+        }
+
+        for (&key, &status) in all_keys.iter() {
+            // We need not send around global keys to neighbors.
+            if status == KeyStatus::Global {
+                continue;
+            }
+            for &neighbor in key.neighbours().iter().filter(|&&key| key.is_valid()) {
+                // Get rank of the neighbour
+                let neighbour_rank = get_key_index(&self.coarse_tree_bounds(), neighbor);
+                rank_key.entry(neighbour);
+            }
+        }
+
+        // We now know which key needs to be sent to which rank.
+        // Turn to array, get the counts and send around.
+
+        let (arr, counts) = {
+            let mut arr = Vec::<MortonKey>::new();
+            let mut counts = Vec::<usize>::new();
+            for index in 0..size - 1 {
+                let value = rank_key.get(&index).unwrap();
+                arr.extend(value.iter());
+                counts.push(value.len());
+            }
+            (arr, counts)
+                    }
+
+        all_keys
     }
 }

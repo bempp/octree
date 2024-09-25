@@ -19,30 +19,6 @@ use itertools::{izip, Itertools};
 use mpi::{collective::SystemOperation, traits::CommunicatorCollectives};
 use rand::Rng;
 
-/// Structure to store ghost keys and their original ranks.
-///
-/// The status is
-/// - 0 for a local interior node.
-/// - 1 for a local leaf node.
-/// - 2 for a global node.
-/// - 3 for a ghost node.
-#[derive(Copy, Clone, Equivalence)]
-pub struct KeyWithStatus {
-    key: MortonKey,
-    // Ideally we would use a typed enum that
-    // combines rank and status. But this is not
-    // supported by the rsmpi Equivalence Macro.
-    status: usize,
-    rank: usize,
-}
-
-impl KeyWithStatus {
-    /// Create a new ghost.
-    pub fn new(key: MortonKey, status: usize, rank: usize) -> Self {
-        Self { key, status, rank }
-    }
-}
-
 /// Compute the global bounding box across all points on all processes.
 pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
     points: &[Point],
