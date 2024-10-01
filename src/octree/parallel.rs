@@ -336,14 +336,14 @@ pub fn create_local_tree(
     // through and locally refine for each block that requires it.
 
     let mut remainder = sorted_fine_keys;
-    let mut new_coarse_keys = Vec::<MortonKey>::new();
+    let mut refined_keys = Vec::<MortonKey>::new();
 
     for (&count, &coarse_key) in izip!(counts.iter(), coarse_keys.iter()) {
         let current;
         (current, remainder) = remainder.split_at(count);
         if coarse_key.level() < max_level && current.len() > max_keys {
             // We need to refine the current split.
-            new_coarse_keys.extend_from_slice(
+            refined_keys.extend_from_slice(
                 create_local_tree(
                     current,
                     coarse_key.children().as_slice(),
@@ -353,11 +353,11 @@ pub fn create_local_tree(
                 .as_slice(),
             );
         } else {
-            new_coarse_keys.push(coarse_key)
+            refined_keys.push(coarse_key)
         }
     }
 
-    new_coarse_keys
+    refined_keys
 }
 
 /// Linearize a set of weighted Morton keys.

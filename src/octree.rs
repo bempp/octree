@@ -1,9 +1,10 @@
 pub mod parallel;
 use std::collections::{HashMap, HashSet};
 
+use itertools::Itertools;
 use mpi::traits::{CommunicatorCollectives, Equivalence};
 pub use parallel::*;
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
 use crate::{
@@ -95,6 +96,8 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
 
         // Duplicate the coarse tree across all nodes
 
+        // let coarse_tree = gather_to_all(&coarse_tree, comm);
+
         Self {
             points: points.to_vec(),
             point_keys,
@@ -154,36 +157,40 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         let size = self.comm().size() as usize;
 
         let mut all_keys = HashMap::<MortonKey, KeyStatus>::new();
+        let mut leaf_keys: HashSet<MortonKey> =
+            HashSet::from_iter(self.leaf_tree().iter().copied());
 
-        // Start from the leafs and work up the tree.
+        let mut global_keys = HashSet::<MortonKey>::new();
 
         // First deal with the parents of the coarse tree. These are different
         // as they may exist on multiple nodes, so receive a different label.
 
-        let mut leaf_keys: HashSet<MortonKey> =
-            HashSet::from_iter(self.leaf_tree().iter().copied());
-
         for &key in self.coarse_tree() {
-            // Need to distingush if coarse tree node is already a leaf or not.
-            if leaf_keys.contains(&key) {
-                all_keys.insert(key, KeyStatus::LocalLeaf);
-                leaf_keys.remove(&key);
-            } else {
-                all_keys.insert(key, KeyStatus::LocalInterior);
-            }
-
-            // We now iterate the parents of the coarse tree. There is no guarantee
-            // that the parents only exist on a single rank. Hence, they get the `Global`
-            // tag.
-
             let mut parent = key.parent();
             while parent.level() > 0 && !all_keys.contains_key(&parent) {
-                all_keys.insert(parent, KeyStatus::Global);
+                global_keys.insert(parent);
                 parent = parent.parent();
             }
         }
 
+        // We now send around the parents of the coarse tree to every node. These will
+        // be global keys.
+
+        let global_keys = gather_to_all(&global_keys.iter().copied().collect_vec(), self.comm());
+
+        // We can now insert the global keys into `all_keys` with the `Global` label.
+        // There may be duplicates in the `global_keys` array. So need to check for that.
+
+        for &key in &global_keys {
+            if !all_keys.contains_key(&key) {
+                all_keys.insert(key, KeyStatus::Global);
+            }
+        }
+
         // We now deal with the fine leafs and their ancestors.
+        // The leafs of the coarse tree will also be either part
+        // of the fine tree leafs or will be interior keys. In either
+        // case the following loop catches them.
 
         for leaf in leaf_keys {
             debug_assert!(!all_keys.contains_key(&leaf));
@@ -207,9 +214,17 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
                 continue;
             }
             for &neighbor in key.neighbours().iter().filter(|&&key| key.is_valid()) {
+                // If the neighbour is a global key then continue.
+                if let Some(&value) = all_keys.get(&neighbor) {
+                    if value == KeyStatus::Global {
+                        continue;
+                    }
+                }
                 // Get rank of the neighbour
-                let neighbour_rank = get_key_index(&self.coarse_tree_bounds(), neighbor);
-                rank_key.entry(neighbour);
+                let neighbor_rank = get_key_index(&self.coarse_tree_bounds(), neighbor);
+                rank_key
+                    .entry(neighbor_rank)
+                    .and_modify(|keys| keys.push(key));
             }
         }
 
@@ -225,7 +240,7 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
                 counts.push(value.len());
             }
             (arr, counts)
-                    }
+        };
 
         all_keys
     }
