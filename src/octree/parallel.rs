@@ -19,6 +19,8 @@ use itertools::{izip, Itertools};
 use mpi::{collective::SystemOperation, traits::CommunicatorCollectives};
 use rand::Rng;
 
+use super::KeyType;
+
 /// Compute the global bounding box across all points on all processes.
 pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
     points: &[Point],
@@ -184,7 +186,7 @@ pub fn compute_coarse_tree_weights<C: CommunicatorCollectives>(
     // intersect with each node of the coarse tree. We then sum up the local weight for each
     // coarse tree node across all nodes to get the weight.
 
-    let global_coarse_tree = gather_to_all(&coarse_tree, comm);
+    let global_coarse_tree = gather_to_all(coarse_tree, comm);
 
     // We also want to send around a corresponding array of ranks so that for each global coarse tree key
     // we have the rank of where it originates from.
@@ -192,7 +194,7 @@ pub fn compute_coarse_tree_weights<C: CommunicatorCollectives>(
     let coarse_tree_ranks = gather_to_all(&vec![rank as usize; coarse_tree.len()], comm);
 
     // We now compute the local weights.
-    let mut local_weight_contribution = vec![0 as usize; global_coarse_tree.len()];
+    let mut local_weight_contribution = vec![0; global_coarse_tree.len()];
 
     // In the following loop we want to be a bit smart. We do not iterate through all the local elements.
     // We know that our keys are sorted and also that the coarse tree keys are sorted. So we find the region
@@ -232,7 +234,7 @@ pub fn compute_coarse_tree_weights<C: CommunicatorCollectives>(
 
     // We now need to sum up the weights across all processes.
 
-    let mut global_weights = vec![0 as usize; global_coarse_tree.len()];
+    let mut global_weights = vec![0; global_coarse_tree.len()];
 
     comm.all_reduce_into(
         &local_weight_contribution,
@@ -291,7 +293,7 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 
     // We now have the counts for each rank. Let's redistribute accordingly and return.
 
-    let result = redistribute(&linear_keys, &rank_counts, comm);
+    let result = redistribute(linear_keys, &rank_counts, comm);
 
     #[cfg(debug_assertions)]
     {
@@ -330,7 +332,7 @@ pub fn create_local_tree(
 
     let bins = coarse_keys.to_vec();
 
-    let counts = sort_to_bins(&sorted_fine_keys, &bins);
+    let counts = sort_to_bins(sorted_fine_keys, &bins);
 
     // We now know how many fine keys are associated with each coarse block. We iterate
     // through and locally refine for each block that requires it.
@@ -378,7 +380,7 @@ pub fn linearize<R: Rng, C: CommunicatorCollectives>(
     // We are first sorting the keys. Then in a linear process across all processors we
     // go through the arrays and delete ancestors of nodes.
 
-    let sorted_keys = parsort(&keys, comm, rng);
+    let sorted_keys = parsort(keys, comm, rng);
 
     // Each process needs to send its first element to the previous process. Each process
     // then goes through its own list and retains elements that are not ancestors of the
@@ -438,7 +440,7 @@ pub fn load_balance<C: CommunicatorCollectives>(
     // of each array to get the global sums and then we update the array of each rank
     // with the sum from the previous ranks.
 
-    let scan = global_inclusive_cumsum(&weights, comm);
+    let scan = global_inclusive_cumsum(weights, comm);
 
     // Now broadcast the total weight to all processes.
 
@@ -477,7 +479,7 @@ pub fn load_balance<C: CommunicatorCollectives>(
     // We create a vector of how many elements to send to each process and
     // then send the actual data.
 
-    let mut recvbuffer = redistribute(&sorted_keys, &counts, comm);
+    let mut recvbuffer = redistribute(sorted_keys, &counts, comm);
 
     recvbuffer.sort_unstable();
     recvbuffer
@@ -673,9 +675,9 @@ pub fn redistribute_points_with_respect_to_coarse_tree<C: CommunicatorCollective
         return (points.to_vec(), morton_keys_for_points.to_vec());
     }
 
-    let sort_indices = argsort(&morton_keys_for_points);
-    let sorted_keys = reorder(&morton_keys_for_points, &sort_indices);
-    let sorted_points = reorder(&points, &sort_indices);
+    let sort_indices = argsort(morton_keys_for_points);
+    let sorted_keys = reorder(morton_keys_for_points, &sort_indices);
+    let sorted_points = reorder(points, &sort_indices);
 
     // Now get the bins
 
@@ -760,10 +762,8 @@ pub fn is_complete_linear_tree<C: CommunicatorCollectives>(arr: &[MortonKey], co
 
     // Now check that at the first rank we include the deepest first.
 
-    if comm.rank() == 0 {
-        if !arr.first().unwrap().is_ancestor(MortonKey::deepest_first()) {
-            complete_linear = false;
-        }
+    if comm.rank() == 0 && !arr.first().unwrap().is_ancestor(MortonKey::deepest_first()) {
+        complete_linear = false;
     }
 
     // Now communicate everything together.
@@ -856,6 +856,122 @@ pub fn key_on_current_rank(
     } else {
         coarse_tree_bounds[rank] <= key && key < coarse_tree_bounds[rank + 1]
     }
+}
+
+/// Generate all leaf and interior keys.
+pub fn generate_all_keys<C: CommunicatorCollectives>(
+    leaf_tree: &[MortonKey],
+    coarse_tree: &[MortonKey],
+    coarse_tree_bounds: &[MortonKey],
+    comm: &C,
+) -> HashMap<MortonKey, KeyType> {
+    /// This struct combines rank and key information for sending ghosts to neighbors.
+    #[derive(Copy, Clone, Equivalence)]
+    struct KeyWithRank {
+        key: MortonKey,
+        rank: usize,
+    }
+
+    let rank = comm.rank() as usize;
+    let size = comm.size() as usize;
+
+    let mut all_keys = HashMap::<MortonKey, KeyType>::new();
+    let leaf_keys: HashSet<MortonKey> = HashSet::from_iter(leaf_tree.iter().copied());
+
+    let mut global_keys = HashSet::<MortonKey>::new();
+
+    // First deal with the parents of the coarse tree. These are different
+    // as they may exist on multiple nodes, so receive a different label.
+
+    for &key in coarse_tree {
+        let mut parent = key.parent();
+        while parent.level() > 0 && !all_keys.contains_key(&parent) {
+            global_keys.insert(parent);
+            parent = parent.parent();
+        }
+    }
+
+    // We now send around the parents of the coarse tree to every node. These will
+    // be global keys.
+
+    let global_keys = gather_to_all(&global_keys.iter().copied().collect_vec(), comm);
+
+    // We can now insert the global keys into `all_keys` with the `Global` label.
+
+    for &key in &global_keys {
+        all_keys.entry(key).or_insert(KeyType::Global);
+    }
+
+    // We now deal with the fine leafs and their ancestors.
+    // The leafs of the coarse tree will also be either part
+    // of the fine tree leafs or will be interior keys. In either
+    // case the following loop catches them.
+
+    for leaf in leaf_keys {
+        debug_assert!(!all_keys.contains_key(&leaf));
+        all_keys.insert(leaf, KeyType::LocalLeaf);
+        let mut parent = leaf.parent();
+        while parent.level() > 0 && !all_keys.contains_key(&parent) {
+            all_keys.insert(parent, KeyType::LocalInterior);
+            parent = parent.parent();
+        }
+    }
+
+    // This maps from rank to the keys that we want to send to the ranks
+    let mut rank_send_ghost = HashMap::<usize, Vec<KeyWithRank>>::new();
+    for index in 0..size - 1 {
+        rank_send_ghost.insert(index, Vec::<KeyWithRank>::new());
+    }
+
+    for (&key, &status) in all_keys.iter() {
+        // We need not send around global keys to neighbors.
+        if status == KeyType::Global {
+            continue;
+        }
+        for &neighbor in key.neighbours().iter().filter(|&&key| key.is_valid()) {
+            // If the neighbour is a global key then continue.
+            if let Some(&value) = all_keys.get(&neighbor) {
+                if value == KeyType::Global {
+                    continue;
+                }
+            }
+            // Get rank of the neighbour
+            let neighbor_rank = get_key_index(coarse_tree_bounds, neighbor);
+            rank_send_ghost
+                .entry(neighbor_rank)
+                .and_modify(|keys| keys.push(KeyWithRank { key, rank }));
+        }
+    }
+
+    // We now know which key needs to be sent to which rank.
+    // Turn to array, get the counts and send around.
+
+    let (arr, counts) = {
+        let mut arr = Vec::<KeyWithRank>::new();
+        let mut counts = Vec::<i32>::new();
+        for index in 0..size - 1 {
+            let keys = rank_send_ghost.get(&index).unwrap();
+            arr.extend(keys.iter());
+            counts.push(keys.len() as i32);
+        }
+        (arr, counts)
+    };
+
+    // These are all the keys that are neighbors to our keys. We now go through
+    // and store those that do not live on our tree as into `all_keys` with a label
+    // of `Ghost`.
+    let ghost_keys = redistribute(&arr, &counts, comm);
+
+    for key in &ghost_keys {
+        if key.rank == rank {
+            // Don't need to add the keys that are already on the rank.
+            continue;
+        }
+        debug_assert!(!all_keys.contains_key(&key.key));
+        all_keys.insert(key.key, KeyType::Ghost(key.rank));
+    }
+
+    all_keys
 }
 
 #[cfg(test)]

@@ -10,7 +10,10 @@ use bempp_octree::{
     },
     tools::{communicate_back, generate_random_points, global_size, is_sorted_array},
 };
-use mpi::{collective::SystemOperation, traits::*};
+use mpi::{
+    collective::SystemOperation,
+    traits::{Communicator, CommunicatorCollectives},
+};
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 

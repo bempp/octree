@@ -1,8 +1,8 @@
+//! Definition of Octree.
 pub mod parallel;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use itertools::Itertools;
-use mpi::traits::{CommunicatorCollectives, Equivalence};
+use mpi::traits::CommunicatorCollectives;
 pub use parallel::*;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -11,14 +11,18 @@ use crate::{
     constants::DEEPEST_LEVEL,
     geometry::{PhysicalBox, Point},
     morton::MortonKey,
-    tools::gather_to_all,
 };
 
+/// Stores what type of key it is.
 #[derive(PartialEq, Eq, Hash, Copy, Clone)]
-pub enum KeyStatus {
+pub enum KeyType {
+    /// A local leaf.
     LocalLeaf,
+    /// A local interior key.
     LocalInterior,
+    /// A global key.
     Global,
+    /// A ghost key from a specific process.
     Ghost(usize),
 }
 
@@ -29,6 +33,7 @@ pub struct Octree<'o, C> {
     coarse_tree: Vec<MortonKey>,
     leaf_tree: Vec<MortonKey>,
     coarse_tree_bounds: Vec<MortonKey>,
+    all_keys: HashMap<MortonKey, KeyType>,
     bounding_box: PhysicalBox,
     comm: &'o C,
 }
@@ -98,12 +103,15 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
 
         // let coarse_tree = gather_to_all(&coarse_tree, comm);
 
+        let all_keys = generate_all_keys(&leaf_tree, &coarse_tree, &coarse_tree_bounds, comm);
+
         Self {
             points: points.to_vec(),
             point_keys,
             coarse_tree,
             leaf_tree,
             coarse_tree_bounds,
+            all_keys,
             bounding_box,
             comm,
         }
@@ -151,97 +159,8 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         self.comm
     }
 
-    /// Generate all leaf and interior keys.
-    pub fn generate_all_keys(&self) -> HashMap<MortonKey, KeyStatus> {
-        let rank = self.comm().rank() as usize;
-        let size = self.comm().size() as usize;
-
-        let mut all_keys = HashMap::<MortonKey, KeyStatus>::new();
-        let mut leaf_keys: HashSet<MortonKey> =
-            HashSet::from_iter(self.leaf_tree().iter().copied());
-
-        let mut global_keys = HashSet::<MortonKey>::new();
-
-        // First deal with the parents of the coarse tree. These are different
-        // as they may exist on multiple nodes, so receive a different label.
-
-        for &key in self.coarse_tree() {
-            let mut parent = key.parent();
-            while parent.level() > 0 && !all_keys.contains_key(&parent) {
-                global_keys.insert(parent);
-                parent = parent.parent();
-            }
-        }
-
-        // We now send around the parents of the coarse tree to every node. These will
-        // be global keys.
-
-        let global_keys = gather_to_all(&global_keys.iter().copied().collect_vec(), self.comm());
-
-        // We can now insert the global keys into `all_keys` with the `Global` label.
-        // There may be duplicates in the `global_keys` array. So need to check for that.
-
-        for &key in &global_keys {
-            if !all_keys.contains_key(&key) {
-                all_keys.insert(key, KeyStatus::Global);
-            }
-        }
-
-        // We now deal with the fine leafs and their ancestors.
-        // The leafs of the coarse tree will also be either part
-        // of the fine tree leafs or will be interior keys. In either
-        // case the following loop catches them.
-
-        for leaf in leaf_keys {
-            debug_assert!(!all_keys.contains_key(&leaf));
-            all_keys.insert(leaf, KeyStatus::LocalLeaf);
-            let mut parent = leaf.parent();
-            while parent.level() > 0 && !all_keys.contains_key(&parent) {
-                all_keys.insert(parent, KeyStatus::LocalInterior);
-                parent = parent.parent();
-            }
-        }
-
-        // This maps from rank to the keys that we want to send to the ranks
-        let mut rank_key = HashMap::<usize, Vec<MortonKey>>::new();
-        for index in 0..size - 1 {
-            rank_key.insert(index, Vec::<MortonKey>::new());
-        }
-
-        for (&key, &status) in all_keys.iter() {
-            // We need not send around global keys to neighbors.
-            if status == KeyStatus::Global {
-                continue;
-            }
-            for &neighbor in key.neighbours().iter().filter(|&&key| key.is_valid()) {
-                // If the neighbour is a global key then continue.
-                if let Some(&value) = all_keys.get(&neighbor) {
-                    if value == KeyStatus::Global {
-                        continue;
-                    }
-                }
-                // Get rank of the neighbour
-                let neighbor_rank = get_key_index(&self.coarse_tree_bounds(), neighbor);
-                rank_key
-                    .entry(neighbor_rank)
-                    .and_modify(|keys| keys.push(key));
-            }
-        }
-
-        // We now know which key needs to be sent to which rank.
-        // Turn to array, get the counts and send around.
-
-        let (arr, counts) = {
-            let mut arr = Vec::<MortonKey>::new();
-            let mut counts = Vec::<usize>::new();
-            for index in 0..size - 1 {
-                let value = rank_key.get(&index).unwrap();
-                arr.extend(value.iter());
-                counts.push(value.len());
-            }
-            (arr, counts)
-        };
-
-        all_keys
+    /// Return a map of all keys.
+    pub fn all_keys(&self) -> &HashMap<MortonKey, KeyType> {
+        &self.all_keys
     }
 }

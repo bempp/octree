@@ -2,7 +2,7 @@
 
 use bempp_octree::tools::{gather_to_root, global_inclusive_cumsum};
 use itertools::{izip, Itertools};
-use mpi::traits::*;
+use mpi::traits::Communicator;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 
@@ -42,7 +42,7 @@ pub fn main() {
         let expected_cum_sum = original_array
             .iter()
             .scan(0, |state, x| {
-                *state = *x + *state;
+                *state += *x;
                 Some(*state)
             })
             .collect_vec();

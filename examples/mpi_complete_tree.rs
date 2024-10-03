@@ -5,7 +5,7 @@ use bempp_octree::{
     octree::{complete_tree, is_complete_linear_tree, linearize, points_to_morton},
     tools::generate_random_points,
 };
-use mpi::traits::*;
+use mpi::traits::Communicator;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
 

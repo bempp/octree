@@ -25,7 +25,7 @@ pub fn gather_to_all<T: Equivalence, C: CommunicatorCollectives>(arr: &[T], comm
 
     let local_len = arr.len() as i32;
 
-    let mut sizes = vec![0 as i32; size as usize];
+    let mut sizes = vec![0; size as usize];
 
     comm.all_gather_into(&local_len, &mut sizes);
 
@@ -170,7 +170,7 @@ pub fn communicate_back<T: Equivalence, C: CommunicatorCollectives>(
 
     if rank == size - 1 {
         comm.process_at_rank(rank - 1).send(arr.first().unwrap());
-        return None;
+        None
     } else {
         let (new_last, _status) = if rank > 0 {
             p2p::send_receive(
@@ -221,9 +221,9 @@ pub fn redistribute<T: Equivalence, C: CommunicatorCollectives>(
 
     // First send the counts around via an alltoall operation.
 
-    let mut recv_counts = vec![0 as i32; counts.len()];
+    let mut recv_counts = vec![0; counts.len()];
 
-    comm.all_to_all_into(&counts[..], &mut recv_counts);
+    comm.all_to_all_into(counts, &mut recv_counts);
 
     // We have the recv_counts. Allocate space and setup the partitions.
 
@@ -288,7 +288,7 @@ pub fn sort_to_bins<T: Ord>(sorted_keys: &[T], bins: &[T]) -> Vec<usize> {
         return vec![sorted_keys.len(); 1];
     }
 
-    let mut bin_counts = vec![0 as usize; nbins];
+    let mut bin_counts = vec![0; nbins];
 
     // This iterates over each possible bin and returns also the associated rank.
     // The last bin position is not iterated over since for an array with p elements
