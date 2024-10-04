@@ -56,7 +56,6 @@ pub fn main() {
     assert!(all_keys.contains_key(&MortonKey::root()));
 
     // Count the number of ghosts on each rank
-
     // Count the number of global keys on each rank.
 
     // Assert that all ghosts are from a different rank and count them.
