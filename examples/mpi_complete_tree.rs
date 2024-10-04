@@ -72,7 +72,7 @@ pub fn main() {
         })
         .count();
 
-    if comm.size() == 0 {
+    if comm.size() == 1 {
         assert_eq!(nghosts, 0);
     } else {
         assert!(nghosts > 0);
