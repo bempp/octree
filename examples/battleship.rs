@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 #[cfg(feature = "battleship")]
-use bempp_octree::octree::Octree;
+use bempp_octree::serial::Octree;
 #[cfg(feature = "battleship")]
 use vtkio::model::*;
 

@@ -5,16 +5,17 @@ use crate::constants::{
     LEVEL_SIZE, NINE_BIT_MASK, NSIBLINGS, X_LOOKUP_DECODE, X_LOOKUP_ENCODE, Y_LOOKUP_DECODE,
     Y_LOOKUP_ENCODE, Z_LOOKUP_DECODE, Z_LOOKUP_ENCODE,
 };
-use crate::geometry::PhysicalBox;
+use crate::geometry::{PhysicalBox, Point};
 use itertools::izip;
 use itertools::Itertools;
+use mpi::traits::Equivalence;
 use std::collections::HashSet;
 
 /// A morton key
 ///
 /// This is a distinct type to distinguish from u64
 /// numbers.
-#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Equivalence)]
 pub struct MortonKey {
     value: u64,
 }
@@ -32,6 +33,13 @@ impl MortonKey {
         // Make sure that Morton keys are valid (only active in debug mode)
         debug_assert!(key.is_well_formed());
         key
+    }
+
+    /// A key that is not valid or well formed but guaranteed to be larger than any valid key.
+    ///
+    /// This is useful when a guaranteed upper bound is needed.
+    pub fn upper_bound() -> Self {
+        Self { value: u64::MAX }
     }
 
     /// Check if a key is invalid.
@@ -147,9 +155,9 @@ impl MortonKey {
 
     /// Map a physical point within a bounding box to a Morton key on a given level.
     /// It is assumed that points are strictly contained within the bounding box.
-    pub fn from_physical_point(point: [f64; 3], bounding_box: &PhysicalBox, level: usize) -> Self {
+    pub fn from_physical_point(point: Point, bounding_box: &PhysicalBox, level: usize) -> Self {
         let level_size = 1 << level;
-        let reference = bounding_box.physical_to_reference(point);
+        let reference = bounding_box.physical_to_reference(point.coords());
         let x = (reference[0] * level_size as f64) as usize;
         let y = (reference[1] * level_size as f64) as usize;
         let z = (reference[2] * level_size as f64) as usize;
@@ -381,6 +389,10 @@ impl MortonKey {
         let mut result = [MortonKey::default(); 26];
 
         let (level, [x, y, z]) = self.decode();
+
+        if level == 0 {
+            return result;
+        }
         let level_size = 1 << level;
 
         for (direction, res) in izip!(DIRECTIONS, result.iter_mut()) {
@@ -407,6 +419,69 @@ impl MortonKey {
             }
         }
         result
+    }
+
+    /// Return the index of the key as a child of the parent, i.e. 0, 1, ..., 7.
+    #[inline(always)]
+    pub fn child_index(&self) -> usize {
+        if *self == MortonKey::root() {
+            return 0;
+        }
+        let level = self.level() as u64;
+
+        let shift = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - level);
+
+        ((self.value >> shift) % 8) as usize
+    }
+
+    /// Return the finest descendent that is opposite to the joint corner with the siblings.
+    pub fn finest_outer_descendent(&self) -> MortonKey {
+        // First find out which child the current key is.
+
+        let level = self.level() as u64;
+
+        if level == DEEPEST_LEVEL {
+            return *self;
+        }
+
+        let mut child_level = 1 + level;
+        let mut key = *self;
+        let outer_index = self.child_index() as u64;
+
+        while child_level <= DEEPEST_LEVEL {
+            let shift = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - child_level);
+            key = MortonKey::new(1 + (key.value | outer_index << shift));
+            child_level += 1;
+        }
+
+        key
+    }
+
+    /// Return the next possible Morton key on the deepest level that is not a descendent of the current key.
+    ///
+    /// If the key is already the last possible key then return None.
+    pub fn next_non_descendent_key(&self) -> Option<MortonKey> {
+        // If we are an ancestor of deepest_last we return None as then there
+        // is next key.
+
+        if self.is_ancestor(MortonKey::deepest_last()) {
+            return None;
+        }
+
+        let level = self.level() as u64;
+
+        let level_diff = DEEPEST_LEVEL - level;
+        let shift = LEVEL_DISPLACEMENT + 3 * level_diff;
+
+        // Need to know which sibling we are.
+        let child_index = ((self.value >> shift) % 8) as usize;
+        // If we are between 0 and 6 take the next sibling and go to deepest level.
+        if child_index < 7 {
+            Some(MortonKey::new(self.value + (1 << shift) + level_diff))
+        } else {
+            // If we are the last child go to the parent and take next key from there.
+            self.parent().next_non_descendent_key()
+        }
     }
 
     /// Linearize by sorting and removing overlaps.
@@ -476,8 +551,10 @@ impl MortonKey {
         result
     }
 
-    /// Complete a region ensuring that the given keys are part of the leafs.
-    pub fn complete_region(keys: &[MortonKey]) -> Vec<MortonKey> {
+    /// Complete a tree ensuring that the given keys are part of the leafs.
+    ///
+    /// The given keys must not overlap.
+    pub fn complete_tree(keys: &[MortonKey]) -> Vec<MortonKey> {
         // First make sure that the input sequence is sorted.
         let mut keys = keys.to_vec();
         keys.sort_unstable();
@@ -490,20 +567,13 @@ impl MortonKey {
             return result;
         }
 
-        // If a single element is given then just return the result if it is the root of the tree.
-        if keys.len() == 1 && result[0] == MortonKey::from_index_and_level([0, 0, 0], 0) {
-            return result;
+        // If just the root is given return that.
+        if keys.len() == 1 && *keys.first().unwrap() == MortonKey::root() {
+            return keys.to_vec();
         }
 
-        let deepest_first = MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize);
-        let deepest_last = MortonKey::from_index_and_level(
-            [
-                LEVEL_SIZE as usize - 1,
-                LEVEL_SIZE as usize - 1,
-                LEVEL_SIZE as usize - 1,
-            ],
-            DEEPEST_LEVEL as usize,
-        );
+        let deepest_first = MortonKey::deepest_first();
+        let deepest_last = MortonKey::deepest_last();
 
         // If the first key is not an ancestor of the deepest possible first element in the
         // tree get the finest ancestor between the two and use the first child of that.
@@ -646,13 +716,7 @@ impl MortonKey {
                     );
                 }
             }
-            new_work_list.extend_from_slice(
-                keys.iter()
-                    .copied()
-                    .filter(|&key| key.level() == level - 1)
-                    .collect_vec()
-                    .as_slice(),
-            );
+            new_work_list.extend(keys.iter().copied().filter(|&key| key.level() == level - 1));
 
             work_list = new_work_list;
             // Now extend the work list with the
@@ -961,8 +1025,6 @@ mod test {
 
         let keys = children[1].fill_between_keys(children[2]);
         assert!(keys.is_empty());
-
-        // Correct result for two keys at deepest level
     }
 
     #[test]
@@ -1011,13 +1073,13 @@ mod test {
 
         let keys = [key1, key2, key3];
 
-        let complete_region = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_tree(keys.as_slice());
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
 
         // For an empty slice the complete region method should just add the root of the tree.
         let keys = Vec::<MortonKey>::new();
-        let complete_region = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_tree(keys.as_slice());
         assert_eq!(complete_region.len(), 1);
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
@@ -1026,7 +1088,7 @@ mod test {
 
         let keys = [MortonKey::deepest_first(), MortonKey::deepest_last()];
 
-        let complete_region = MortonKey::complete_region(keys.as_slice());
+        let complete_region = MortonKey::complete_tree(keys.as_slice());
 
         sanity_checks(keys.as_slice(), complete_region.as_slice());
     }
@@ -1222,7 +1284,7 @@ mod test {
     pub fn test_from_physical_point() {
         let bounding_box = PhysicalBox::new([-2.0, -3.0, -1.0, 4.0, 5.0, 6.0]);
 
-        let point = [1.5, -2.5, 5.0];
+        let point = Point::new([1.5, -2.5, 5.0], 0);
         let level = 10;
 
         let key = MortonKey::from_physical_point(point, &bounding_box, level);
@@ -1231,10 +1293,79 @@ mod test {
 
         let coords = physical_box.coordinates();
 
-        assert!(coords[0] <= point[0] && point[0] < coords[3]);
-        assert!(coords[1] <= point[1] && point[1] < coords[4]);
-        assert!(coords[2] <= point[2] && point[2] < coords[5]);
+        assert!(coords[0] <= point.coords()[0] && point.coords()[0] < coords[3]);
+        assert!(coords[1] <= point.coords()[1] && point.coords()[1] < coords[4]);
+        assert!(coords[2] <= point.coords()[2] && point.coords()[2] < coords[5]);
 
         // Now compute the box.
+    }
+
+    #[test]
+    pub fn test_child_index() {
+        let key = MortonKey::from_index_and_level([1, 501, 718], 10);
+
+        let children = key.children();
+
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(index, child.child_index());
+        }
+    }
+
+    #[test]
+    pub fn test_finest_outer_descendent() {
+        let key = MortonKey::from_index_and_level([0, 0, 0], 1);
+
+        let finest_outer_descendent = key.finest_outer_descendent();
+
+        assert_eq!(
+            finest_outer_descendent,
+            MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize)
+        );
+
+        let key = MortonKey::from_index_and_level([1, 1, 0], 1);
+        let finest_outer_descendent = key.finest_outer_descendent();
+
+        assert_eq!(
+            finest_outer_descendent,
+            MortonKey::from_index_and_level(
+                [LEVEL_SIZE as usize - 1, LEVEL_SIZE as usize - 1, 0],
+                DEEPEST_LEVEL as usize
+            )
+        );
+    }
+
+    #[test]
+    pub fn test_next_nondescendent_key() {
+        let key = MortonKey::from_index_and_level([25, 17, 6], 5);
+
+        let children = key.children();
+
+        // Check the next nondescendent key for the first six children
+
+        for (child, next_child) in children.iter().tuple_windows() {
+            let next_key = child.next_non_descendent_key().unwrap();
+            assert_eq!(next_key.level(), DEEPEST_LEVEL as usize);
+            assert!(!child.is_ancestor(next_key));
+            assert!(next_child.is_ancestor(next_key));
+        }
+
+        // Now check the next nondescendent key from the last child.
+
+        let next_child = children.last().unwrap().next_non_descendent_key();
+
+        // Check that the next nondescendent key from the parent is the same as that of the last child.
+
+        assert_eq!(key.next_non_descendent_key(), next_child);
+
+        // Check that it is not a descendent of the parent and that its level is correct.
+
+        assert_eq!(next_child.unwrap().level(), DEEPEST_LEVEL as usize);
+        assert!(!key.is_ancestor(next_child.unwrap()));
+
+        // Finally make sure that an ancestor of deepest last returns None.
+
+        assert!(MortonKey::deepest_last()
+            .next_non_descendent_key()
+            .is_none());
     }
 }

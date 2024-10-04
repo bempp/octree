@@ -1,325 +1,168 @@
-//! Definition of a linear octree
+//! Definition of Octree.
+pub mod parallel;
+use std::collections::HashMap;
+
+use mpi::traits::CommunicatorCollectives;
+pub use parallel::*;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 use crate::{
-    constants::{DEEPEST_LEVEL, NLEVELS},
-    geometry::PhysicalBox,
+    constants::DEEPEST_LEVEL,
+    geometry::{PhysicalBox, Point},
     morton::MortonKey,
 };
-use bytemuck;
-use std::collections::HashMap;
-use vtkio;
 
-/// A neighbour
-pub struct Neighbour {
-    /// Direction
-    pub direction: [i64; 3],
-    /// Level
-    pub level: usize,
-    /// Morton key
-    pub key: MortonKey,
+/// Stores what type of key it is.
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum KeyType {
+    /// A local leaf.
+    LocalLeaf,
+    /// A local interior key.
+    LocalInterior,
+    /// A global key.
+    Global,
+    /// A ghost key from a specific process.
+    Ghost(usize),
 }
 
-/// An octree
-pub struct Octree {
-    leaf_keys: Vec<MortonKey>,
-    points: Vec<[f64; 3]>,
-    point_to_level_keys: [Vec<MortonKey>; NLEVELS],
+/// A general structure for octrees.
+pub struct Octree<'o, C> {
+    points: Vec<Point>,
+    point_keys: Vec<MortonKey>,
+    coarse_tree: Vec<MortonKey>,
+    leaf_tree: Vec<MortonKey>,
+    coarse_tree_bounds: Vec<MortonKey>,
+    all_keys: HashMap<MortonKey, KeyType>,
     bounding_box: PhysicalBox,
-    key_counts: HashMap<MortonKey, usize>,
-    max_leaf_level: usize,
-    max_points_in_leaf: usize,
+    comm: &'o C,
 }
 
-impl Octree {
-    /// Create octress from points
-    pub fn from_points(points: &[f64], max_level: usize, max_points_per_box: usize) -> Self {
-        // Make sure that the points array is a multiple of 3.
-        assert_eq!(points.len() % 3, 0);
+impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
+    /// Create a new distributed Octree.
+    pub fn new(points: &[Point], max_level: usize, max_leaf_points: usize, comm: &'o C) -> Self {
+        // We need a random number generator for sorting. For simplicity we use a ChaCha8 random number generator
+        // seeded with the rank of the process.
+        let mut rng = ChaCha8Rng::seed_from_u64(comm.rank() as u64);
 
-        // Make sure that max level never exceeds DEEPEST_LEVEL
-        let max_level = if max_level > DEEPEST_LEVEL as usize {
-            DEEPEST_LEVEL as usize
-        } else {
-            max_level
+        // First compute the Morton keys of the points.
+        let (point_keys, bounding_box) = points_to_morton(points, DEEPEST_LEVEL as usize, comm);
+
+        // Generate the coarse tree
+
+        let (coarse_tree, leaf_tree) = {
+            // Linearize the keys.
+            let linear_keys = linearize(&point_keys, &mut rng, comm);
+
+            // Compute the first version of the coarse tree without load balancing.
+            // We want to ensure that it is 2:1 balanced.
+            let coarse_tree = compute_coarse_tree(&linear_keys, comm);
+
+            let coarse_tree = balance(&coarse_tree, &mut rng, comm);
+            debug_assert!(is_complete_linear_tree(&coarse_tree, comm));
+
+            // We now compute the weights for the initial coarse tree.
+
+            let weights = compute_coarse_tree_weights(&linear_keys, &coarse_tree, comm);
+
+            // We now load balance the initial coarse tree. This forms our final coarse tree
+            // that is used from now on.
+
+            let coarse_tree = load_balance(&coarse_tree, &weights, comm);
+            // We also want to redistribute the fine keys with respect to the load balanced coarse trees.
+
+            let fine_keys =
+                redistribute_with_respect_to_coarse_tree(&linear_keys, &coarse_tree, comm);
+
+            // We now create the refined tree by recursing the coarse tree until we are at max level
+            // or the fine tree keys per coarse tree box is small enough.
+            let refined_tree =
+                create_local_tree(&fine_keys, &coarse_tree, max_level, max_leaf_points);
+
+            // We now need to 2:1 balance the refined tree and then redistribute again with respect to the coarse tree.
+
+            let refined_tree = redistribute_with_respect_to_coarse_tree(
+                &balance(&refined_tree, &mut rng, comm),
+                &coarse_tree,
+                comm,
+            );
+
+            (coarse_tree, refined_tree)
+
+            // redistribute the balanced tree according to coarse tree
         };
 
-        // Compute the physical bounding box.
-
-        let bounding_box = PhysicalBox::from_points(points);
-
-        // Bunch the points in arrays of 3.
-
-        let points: &[[f64; 3]] = bytemuck::cast_slice(points);
-        let npoints = points.len();
-
-        // We create a vector of keys for each point on each level. We compute the
-        // keys on the deepest level and fill the other levels by going from
-        // parent to parent.
-
-        let mut point_to_level_keys: [Vec<MortonKey>; NLEVELS] = Default::default();
-        point_to_level_keys[DEEPEST_LEVEL as usize] = points
-            .iter()
-            .map(|&point| {
-                MortonKey::from_physical_point(point, &bounding_box, DEEPEST_LEVEL as usize)
-            })
-            .collect::<Vec<_>>();
-
-        for index in (1..=DEEPEST_LEVEL as usize).rev() {
-            let mut new_vec = Vec::<MortonKey>::with_capacity(npoints);
-            for &key in &point_to_level_keys[index] {
-                new_vec.push(key.parent());
-            }
-            point_to_level_keys[index - 1] = new_vec;
-        }
-
-        // We now have to create level keys. We are starting at the root and recursing
-        // down until each box has fewer than max_points_per_box keys.
-
-        // First we compute the counts of each key on each level. For that we create
-        // for each level a Hashmap for the keys and then add up.
-
-        let mut key_counts: HashMap<MortonKey, usize> = Default::default();
-
-        for keys in &point_to_level_keys {
-            for key in keys {
-                *key_counts.entry(*key).or_default() += 1;
-            }
-        }
-
-        // We can now easily create an adaptive tree by subdividing. We do this by
-        // a recursive function.
-
-        let mut leaf_keys = Vec::<MortonKey>::new();
-
-        fn recurse_keys(
-            key: MortonKey,
-            key_counts: &HashMap<MortonKey, usize>,
-            leaf_keys: &mut Vec<MortonKey>,
-            max_points_per_box: usize,
-            max_level: usize,
-        ) {
-            let level = key.level();
-            // A key may have not be associated with points. This happens if one of the children on
-            // the previous level has no points in its physical box. However, we want to create a
-            // complete tree. So we still add this one empty child.
-            if let Some(&count) = key_counts.get(&key) {
-                if count > max_points_per_box && level < max_level {
-                    for child in key.children() {
-                        recurse_keys(child, key_counts, leaf_keys, max_points_per_box, max_level);
-                    }
-                } else {
-                    leaf_keys.push(key)
-                }
-            } else {
-                leaf_keys.push(key)
-            }
-        }
-
-        // Now execute the recursion starting from root
-
-        recurse_keys(
-            MortonKey::root(),
-            &key_counts,
-            &mut leaf_keys,
-            max_points_per_box,
-            max_level,
+        let (points, point_keys) = redistribute_points_with_respect_to_coarse_tree(
+            points,
+            &point_keys,
+            &coarse_tree,
+            comm,
         );
 
-        // The leaf keys are now a complete linear tree. But they are not yet balanced.
-        // In the final step we balance the leafs.
+        let coarse_tree_bounds = get_tree_bins(&coarse_tree, comm);
 
-        let leaf_keys = MortonKey::balance(&leaf_keys, MortonKey::root());
+        // Duplicate the coarse tree across all nodes
 
-        let mut max_leaf_level = 0;
-        let mut max_points_in_leaf = 0;
+        // let coarse_tree = gather_to_all(&coarse_tree, comm);
 
-        for key in &leaf_keys {
-            max_leaf_level = max_leaf_level.max(key.level());
-            max_points_in_leaf =
-                max_points_in_leaf.max(if let Some(&count) = key_counts.get(key) {
-                    count
-                } else {
-                    0
-                });
-        }
+        let all_keys = generate_all_keys(&leaf_tree, &coarse_tree, &coarse_tree_bounds, comm);
 
         Self {
-            leaf_keys,
             points: points.to_vec(),
-            point_to_level_keys,
+            point_keys,
+            coarse_tree,
+            leaf_tree,
+            coarse_tree_bounds,
+            all_keys,
             bounding_box,
-            key_counts,
-            max_leaf_level,
-            max_points_in_leaf,
+            comm,
         }
     }
 
-    /// Leaf keys
-    pub fn leaf_keys(&self) -> &Vec<MortonKey> {
-        &self.leaf_keys
+    /// Return the keys associated with the redistributed points.
+    pub fn point_keys(&self) -> &Vec<MortonKey> {
+        &self.point_keys
     }
 
-    /// Points
-    pub fn points(&self) -> &Vec<[f64; 3]> {
-        &self.points
-    }
-
-    /// Get level keys for each point
-    pub fn point_to_level_keys(&self) -> &[Vec<MortonKey>; NLEVELS] {
-        &self.point_to_level_keys
-    }
-
-    /// Bounding box
+    /// Return the bounding box.
     pub fn bounding_box(&self) -> &PhysicalBox {
         &self.bounding_box
     }
 
-    /// Maximum leaf level
-    pub fn maximum_leaf_level(&self) -> usize {
-        self.max_leaf_level
+    /// Return the associated coarse tree.
+    pub fn coarse_tree(&self) -> &Vec<MortonKey> {
+        &self.coarse_tree
     }
 
-    /// Maximum number of points in a leaf box
-    pub fn max_points_in_leaf_box(&self) -> usize {
-        self.max_points_in_leaf
+    /// Return the points.
+    ///
+    /// Points are distributed across the nodes as part of the tree generation.
+    /// This function returns the redistributed points.
+    pub fn points(&self) -> &Vec<Point> {
+        &self.points
     }
 
-    /// Number of points in the box indexed by a key
-    pub fn number_of_points_in_key(&self, key: MortonKey) -> usize {
-        if let Some(&count) = self.key_counts.get(&key) {
-            count
-        } else {
-            0
-        }
+    /// Return the leaf tree.
+    pub fn leaf_tree(&self) -> &Vec<MortonKey> {
+        &self.leaf_tree
     }
 
-    /// Export the tree to vtk
-    pub fn export_to_vtk(&self, file_path: &str) {
-        use vtkio::model::{
-            Attributes, ByteOrder, CellType, Cells, DataSet, IOBuffer, UnstructuredGridPiece,
-            Version, VertexNumbers,
-        };
-
-        // Each box has 8 corners with 3 coordinates each, hence 24 floats per key.
-        let mut points = Vec::<f64>::new();
-        // 8 coords per box, hence 8 * nkeys values in connectivity.
-        let mut connectivity = Vec::<u64>::new();
-        // Store the vtk offset for each box.
-        let mut offsets = Vec::<u64>::new();
-
-        let bounding_box = self.bounding_box();
-
-        // Go through the keys and add coordinates and connectivity.
-        // Box coordinates are already in the right order, so connectivity
-        // just counts up. We don't mind doubly counted vertices from two boxes.
-        let mut point_count = 0;
-        let mut key_count = 0;
-
-        for key in self.leaf_keys().iter() {
-            // We only want to export non-empty boxes.
-            if self.number_of_points_in_key(*key) == 0 {
-                continue;
-            }
-            let coords = key.physical_box(bounding_box).corners();
-
-            key_count += 1;
-            offsets.push(8 * key_count);
-
-            for coord in &coords {
-                points.push(coord[0]);
-                points.push(coord[1]);
-                points.push(coord[2]);
-
-                connectivity.push(point_count);
-                point_count += 1;
-            }
-        }
-
-        let vtk_file = vtkio::Vtk {
-            version: Version::new((1, 0)),
-            title: String::new(),
-            byte_order: ByteOrder::LittleEndian,
-            file_path: None,
-            data: DataSet::inline(UnstructuredGridPiece {
-                points: IOBuffer::F64(points),
-                cells: Cells {
-                    cell_verts: VertexNumbers::XML {
-                        connectivity,
-                        offsets,
-                    },
-                    types: vec![CellType::Hexahedron; key_count as usize],
-                },
-                data: Attributes {
-                    point: vec![],
-                    cell: vec![],
-                },
-            }),
-        };
-
-        vtk_file.export_ascii(file_path).unwrap();
+    /// Get the coarse tree bounds.
+    ///
+    /// This returns an array of size the number of ranks,
+    /// where each element consists of the smallest Morton key in
+    /// the corresponding rank.
+    pub fn coarse_tree_bounds(&self) -> &Vec<MortonKey> {
+        &self.coarse_tree_bounds
     }
 
-    // We can now create the vtk object.
-}
-
-#[cfg(test)]
-mod test {
-    use super::Octree;
-    use rand::prelude::*;
-
-    fn get_points_on_sphere(npoints: usize) -> Vec<f64> {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
-        let normal = rand_distr::Normal::new(0.0, 1.0).unwrap();
-
-        let mut points = Vec::<f64>::with_capacity(3 * npoints);
-        for _ in 0..(npoints) {
-            let x: f64 = normal.sample(&mut rng);
-            let y: f64 = normal.sample(&mut rng);
-            let z: f64 = normal.sample(&mut rng);
-
-            let norm = (x * x + y * y + z * z).sqrt();
-
-            points.push(x / norm);
-            points.push(y / norm);
-            points.push(z / norm);
-        }
-
-        points
+    /// Return the communicator.
+    pub fn comm(&self) -> &C {
+        self.comm
     }
 
-    #[test]
-    fn test_octree() {
-        use std::time::Instant;
-
-        let npoints = 1000000;
-        let points = get_points_on_sphere(npoints);
-        let max_level = 7;
-        let max_points_per_box = 100;
-
-        let start = Instant::now();
-        let octree = Octree::from_points(&points, max_level, max_points_per_box);
-        let duration = start.elapsed();
-
-        println!("Creation time: {}", duration.as_millis());
-        println!("Number of leaf keys: {}", octree.leaf_keys().len());
-        println!("Bounding box: {}", octree.bounding_box());
-    }
-
-    #[test]
-    fn test_export() {
-        let fname = "_test_sphere.vtk";
-        let npoints = 1000000;
-        let points = get_points_on_sphere(npoints);
-        let max_level = 7;
-        let max_points_per_box = 100;
-
-        let octree = Octree::from_points(&points, max_level, max_points_per_box);
-
-        octree.export_to_vtk(fname);
-        println!("Maximum leaf level: {}", octree.maximum_leaf_level());
-        println!(
-            "Maximum number of points in leaf box: {}",
-            octree.max_points_in_leaf_box()
-        );
+    /// Return a map of all keys.
+    pub fn all_keys(&self) -> &HashMap<MortonKey, KeyType> {
+        &self.all_keys
     }
 }

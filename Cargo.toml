@@ -7,7 +7,9 @@ battleship = []
 name = "bempp-octree"
 version = "0.0.1-dev"
 edition = "2021"
-authors = ["Srinath Kailasa <srinathkailasa@gmail.com>, Timo Betcke <timo.betcke@gmail.com>"]
+authors = [
+    "Srinath Kailasa <srinathkailasa@gmail.com>, Timo Betcke <timo.betcke@gmail.com>",
+]
 description = "A library to create Octrees"
 license = "BSD-3-Clause"
 homepage = "https://github.com/bempp/octree"
@@ -22,14 +24,15 @@ crate-type = ["cdylib", "lib"]
 
 [dependencies]
 itertools = "0.13.*"
-rand = "0.8.5"
-bytemuck = "1.*"
+rand = { version = "0.8.5", features = ["alloc"] }
+rand_chacha = "0.3.*"
+num = "0.4.*"
 vtkio = "0.6.*"
-mpi = {version = "0.8.*", features = ["derive", "user-operations"] }
+mpi = { version = "0.8.*", features = ["derive", "user-operations"] }
 
 [profile.release]
 debug = 1
- 
+
 [dev-dependencies]
 rand_distr = "0.4.3"
 #criterion = { version = "0.5.*", features = ["html_reports"]}

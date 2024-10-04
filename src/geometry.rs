@@ -1,8 +1,32 @@
 //! Geometry information
 
-use bytemuck;
+use mpi::traits::Equivalence;
 
 use crate::constants::DEEPEST_LEVEL;
+
+/// Definition of a point.
+#[derive(Clone, Copy, Equivalence)]
+pub struct Point {
+    coords: [f64; 3],
+    global_id: usize,
+}
+
+impl Point {
+    /// Create a new point from coordinates and global id.
+    pub fn new(coords: [f64; 3], global_id: usize) -> Self {
+        Self { coords, global_id }
+    }
+
+    /// Return the coordintes of a point.
+    pub fn coords(&self) -> [f64; 3] {
+        self.coords
+    }
+
+    /// Return the global id of the point.
+    pub fn global_id(&self) -> usize {
+        self.global_id
+    }
+}
 
 /// A bounding box describes geometry in which an Octree lives.
 pub struct PhysicalBox {
@@ -18,11 +42,7 @@ impl PhysicalBox {
     }
 
     /// Give a slice of points. Compute an associated bounding box.
-    pub fn from_points(points: &[f64]) -> PhysicalBox {
-        assert_eq!(points.len() % 3, 0);
-
-        let points: &[[f64; 3]] = bytemuck::cast_slice(points);
-
+    pub fn from_points(points: &[Point]) -> PhysicalBox {
         let mut xmin = f64::MAX;
         let mut xmax = f64::MIN;
 
@@ -33,9 +53,9 @@ impl PhysicalBox {
         let mut zmax = f64::MIN;
 
         for point in points {
-            let x = point[0];
-            let y = point[1];
-            let z = point[2];
+            let x = point.coords()[0];
+            let y = point.coords()[1];
+            let z = point.coords()[2];
 
             xmin = f64::min(xmin, x);
             xmax = f64::max(xmax, x);
