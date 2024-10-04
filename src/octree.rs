@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Stores what type of key it is.
-#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+#[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum KeyType {
     /// A local leaf.
     LocalLeaf,
@@ -55,7 +55,10 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
             let linear_keys = linearize(&point_keys, &mut rng, comm);
 
             // Compute the first version of the coarse tree without load balancing.
+            // We want to ensure that it is 2:1 balanced.
             let coarse_tree = compute_coarse_tree(&linear_keys, comm);
+
+            let coarse_tree = balance(&coarse_tree, &mut rng, comm);
             debug_assert!(is_complete_linear_tree(&coarse_tree, comm));
 
             // We now compute the weights for the initial coarse tree.
@@ -66,7 +69,6 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
             // that is used from now on.
 
             let coarse_tree = load_balance(&coarse_tree, &weights, comm);
-
             // We also want to redistribute the fine keys with respect to the load balanced coarse trees.
 
             let fine_keys =

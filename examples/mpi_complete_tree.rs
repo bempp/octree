@@ -1,10 +1,11 @@
-//! Test the computation of a global bounding box across MPI ranks.
+//! Test the computation of a complete octree.
 
 use bempp_octree::{
-    constants::DEEPEST_LEVEL,
-    octree::{complete_tree, is_complete_linear_tree, linearize, points_to_morton},
-    tools::generate_random_points,
+    morton::MortonKey,
+    octree::{is_complete_linear_and_balanced, KeyType, Octree},
+    tools::{gather_to_all, generate_random_points},
 };
+use itertools::Itertools;
 use mpi::traits::Communicator;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
@@ -20,21 +21,73 @@ pub fn main() {
     let mut rng = ChaCha8Rng::seed_from_u64(comm.rank() as u64);
 
     // Create `npoints` per rank.
-    let npoints = 10;
+    let npoints = 10000;
 
     // Generate random points.
 
     let points = generate_random_points(npoints, &mut rng, &comm);
 
-    // Compute the Morton keys on the deepest level
-    let (keys, _) = points_to_morton(&points, DEEPEST_LEVEL as usize, &comm);
+    let tree = Octree::new(&points, 15, 50, &comm);
 
-    let linear_keys = linearize(&keys, &mut rng, &comm);
+    // We now check that each node of the tree has all its neighbors available.
 
-    // Generate a complete tree
-    let distributed_complete_tree = complete_tree(&linear_keys, &comm);
+    let leaf_tree = tree.leaf_tree();
+    let all_keys = tree.all_keys();
 
-    assert!(is_complete_linear_tree(&distributed_complete_tree, &comm));
+    assert!(is_complete_linear_and_balanced(leaf_tree, &comm));
+    for &key in leaf_tree {
+        let mut parent = key;
+        while parent.level() > 0 {
+            // Check that the key itself is there.
+            assert!(all_keys.contains_key(&key));
+            // Check that all its neighbours are there.
+            for neighbor in parent.neighbours().iter().filter(|&key| key.is_valid()) {
+                if !all_keys.contains_key(neighbor) {
+                    println!(
+                        "Missing neighbor: {}. Key type {:#?}",
+                        neighbor,
+                        all_keys.get(&parent).unwrap()
+                    );
+                }
+                assert!(all_keys.contains_key(neighbor));
+            }
+            parent = parent.parent();
+            // Check that the parent is there.
+            assert!(all_keys.contains_key(&parent));
+        }
+    }
+
+    // At the end check that the root of the tree is also contained.
+    assert!(all_keys.contains_key(&MortonKey::root()));
+
+    // Count the number of ghosts on each rank
+
+    // Count the number of global keys on each rank.
+
+    // Assert that all ghosts are from a different rank and count them.
+
+    let nghosts = all_keys
+        .iter()
+        .filter_map(|(_, &value)| {
+            if let KeyType::Ghost(rank) = value {
+                assert!(rank != comm.size() as usize);
+                Some(rank)
+            } else {
+                None
+            }
+        })
+        .count();
+
+    let nglobal = all_keys
+        .iter()
+        .filter(|(_, &value)| matches!(value, KeyType::Global))
+        .count();
+
+    // Assert that all globals across all ranks have the same count.
+
+    let nglobals = gather_to_all(std::slice::from_ref(&nglobal), &comm);
+
+    assert_eq!(nglobals.iter().unique().count(), 1);
 
     if comm.rank() == 0 {
         println!("Distributed tree is complete and linear.");

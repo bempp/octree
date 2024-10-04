@@ -559,6 +559,13 @@ pub fn balance<R: Rng, C: CommunicatorCollectives>(
     rng: &mut R,
     comm: &C,
 ) -> Vec<MortonKey> {
+    // Treat the case that the length of the keys is one and is only the root.
+    // This would lead to an empty output below as we only iterate up to level 1.
+
+    if linear_keys.len() == 1 && *linear_keys.first().unwrap() == MortonKey::root() {
+        return vec![MortonKey::root()];
+    }
+
     let deepest_level = deepest_level(linear_keys, comm);
 
     // Start with keys at deepest level
@@ -602,7 +609,6 @@ pub fn balance<R: Rng, C: CommunicatorCollectives>(
         );
 
         work_list = new_work_list;
-        // Now extend the work list with the
     }
 
     let result = linearize(&result, rng, comm);
@@ -653,6 +659,10 @@ pub fn redistribute_points_with_respect_to_coarse_tree<C: CommunicatorCollective
     coarse_tree: &[MortonKey],
     comm: &C,
 ) -> (Vec<Point>, Vec<MortonKey>) {
+    if comm.size() == 1 {
+        return (points.to_vec(), morton_keys_for_points.to_vec());
+    }
+
     pub fn argsort<T: Ord + Copy>(arr: &[T]) -> Vec<usize> {
         let mut sort_indices = (0..arr.len()).collect_vec();
         sort_indices.sort_unstable_by_key(|&index| arr[index]);
@@ -878,28 +888,32 @@ pub fn generate_all_keys<C: CommunicatorCollectives>(
     let mut all_keys = HashMap::<MortonKey, KeyType>::new();
     let leaf_keys: HashSet<MortonKey> = HashSet::from_iter(leaf_tree.iter().copied());
 
-    let mut global_keys = HashSet::<MortonKey>::new();
+    // If size == 1 we simply create locally the keys, so don't need to treat the global keys.
 
-    // First deal with the parents of the coarse tree. These are different
-    // as they may exist on multiple nodes, so receive a different label.
+    if size > 1 {
+        let mut global_keys = HashSet::<MortonKey>::new();
 
-    for &key in coarse_tree {
-        let mut parent = key.parent();
-        while parent.level() > 0 && !all_keys.contains_key(&parent) {
-            global_keys.insert(parent);
-            parent = parent.parent();
+        // First deal with the parents of the coarse tree. These are different
+        // as they may exist on multiple nodes, so receive a different label.
+
+        for &key in coarse_tree {
+            let mut parent = key.parent();
+            while parent.level() > 0 && !all_keys.contains_key(&parent) {
+                global_keys.insert(parent);
+                parent = parent.parent();
+            }
         }
-    }
 
-    // We now send around the parents of the coarse tree to every node. These will
-    // be global keys.
+        // We now send around the parents of the coarse tree to every node. These will
+        // be global keys.
 
-    let global_keys = gather_to_all(&global_keys.iter().copied().collect_vec(), comm);
+        let global_keys = gather_to_all(&global_keys.iter().copied().collect_vec(), comm);
 
-    // We can now insert the global keys into `all_keys` with the `Global` label.
+        // We can now insert the global keys into `all_keys` with the `Global` label.
 
-    for &key in &global_keys {
-        all_keys.entry(key).or_insert(KeyType::Global);
+        for &key in &global_keys {
+            all_keys.entry(key).or_insert(KeyType::Global);
+        }
     }
 
     // We now deal with the fine leafs and their ancestors.
@@ -917,58 +931,73 @@ pub fn generate_all_keys<C: CommunicatorCollectives>(
         }
     }
 
-    // This maps from rank to the keys that we want to send to the ranks
-    let mut rank_send_ghost = HashMap::<usize, Vec<KeyWithRank>>::new();
-    for index in 0..size - 1 {
-        rank_send_ghost.insert(index, Vec::<KeyWithRank>::new());
-    }
+    // Need to explicitly add the root at the end.
+    all_keys.entry(MortonKey::root()).or_insert(KeyType::Global);
 
-    for (&key, &status) in all_keys.iter() {
-        // We need not send around global keys to neighbors.
-        if status == KeyType::Global {
-            continue;
+    // We only need to deal with ghosts if the size is larger than 1.
+
+    if size > 1 {
+        // This maps from rank to the keys that we want to send to the ranks
+
+        let mut rank_send_ghost = HashMap::<usize, Vec<KeyWithRank>>::new();
+        for index in 0..size {
+            rank_send_ghost.insert(index, Vec::<KeyWithRank>::new());
         }
-        for &neighbor in key.neighbours().iter().filter(|&&key| key.is_valid()) {
-            // If the neighbour is a global key then continue.
-            if let Some(&value) = all_keys.get(&neighbor) {
-                if value == KeyType::Global {
-                    continue;
+
+        let mut send_to_all = Vec::<KeyWithRank>::new();
+
+        for (&key, &status) in all_keys.iter() {
+            // We need not send around global keys to neighbors.
+            if status == KeyType::Global {
+                continue;
+            }
+            for &neighbor in key.neighbours().iter().filter(|&&key| key.is_valid()) {
+                // If the neighbour is a global key then continue.
+                if all_keys
+                    .get(&neighbor)
+                    .is_some_and(|&value| value == KeyType::Global)
+                {
+                    // Global keys exist on all nodes, so need to send their neighbors to all nodes.
+                    send_to_all.push(KeyWithRank { key, rank });
+                } else {
+                    // Get rank of the neighbour
+                    let neighbor_rank = get_key_index(coarse_tree_bounds, neighbor);
+                    rank_send_ghost
+                        .entry(neighbor_rank)
+                        .and_modify(|keys| keys.push(KeyWithRank { key, rank }));
                 }
             }
-            // Get rank of the neighbour
-            let neighbor_rank = get_key_index(coarse_tree_bounds, neighbor);
-            rank_send_ghost
-                .entry(neighbor_rank)
-                .and_modify(|keys| keys.push(KeyWithRank { key, rank }));
         }
-    }
 
-    // We now know which key needs to be sent to which rank.
-    // Turn to array, get the counts and send around.
+        let send_ghost_to_all = gather_to_all(&send_to_all, comm);
+        // We now know which key needs to be sent to which rank.
+        // Turn to array, get the counts and send around.
 
-    let (arr, counts) = {
-        let mut arr = Vec::<KeyWithRank>::new();
-        let mut counts = Vec::<i32>::new();
-        for index in 0..size - 1 {
-            let keys = rank_send_ghost.get(&index).unwrap();
-            arr.extend(keys.iter());
-            counts.push(keys.len() as i32);
+        let (arr, counts) = {
+            let mut arr = Vec::<KeyWithRank>::new();
+            let mut counts = Vec::<i32>::new();
+            for index in 0..size {
+                let keys = rank_send_ghost.get(&index).unwrap();
+                arr.extend(keys.iter());
+                counts.push(keys.len() as i32);
+            }
+            (arr, counts)
+        };
+
+        // These are all the keys that are neighbors to our keys. We now go through
+        // and store those that do not live on our tree as into `all_keys` with a label
+        // of `Ghost`.
+        let mut ghost_keys = redistribute(&arr, &counts, comm);
+        // Add the neighbors of any global key.
+        ghost_keys.extend(send_ghost_to_all.iter());
+
+        for key in &ghost_keys {
+            if key.rank == rank {
+                // Don't need to add the keys that are already on the rank.
+                continue;
+            }
+            all_keys.insert(key.key, KeyType::Ghost(key.rank));
         }
-        (arr, counts)
-    };
-
-    // These are all the keys that are neighbors to our keys. We now go through
-    // and store those that do not live on our tree as into `all_keys` with a label
-    // of `Ghost`.
-    let ghost_keys = redistribute(&arr, &counts, comm);
-
-    for key in &ghost_keys {
-        if key.rank == rank {
-            // Don't need to add the keys that are already on the rank.
-            continue;
-        }
-        debug_assert!(!all_keys.contains_key(&key.key));
-        all_keys.insert(key.key, KeyType::Ghost(key.rank));
     }
 
     all_keys

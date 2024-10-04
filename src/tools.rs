@@ -168,6 +168,10 @@ pub fn communicate_back<T: Equivalence, C: CommunicatorCollectives>(
     let rank = comm.rank();
     let size = comm.size();
 
+    if size == 1 {
+        return None;
+    }
+
     if rank == size - 1 {
         comm.process_at_rank(rank - 1).send(arr.first().unwrap());
         None
