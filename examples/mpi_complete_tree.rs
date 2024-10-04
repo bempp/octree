@@ -36,19 +36,14 @@ pub fn main() {
 
     assert!(is_complete_linear_and_balanced(leaf_tree, &comm));
     for &key in leaf_tree {
-        let mut parent = key;
+        // We only check interior keys. Leaf keys may not have a neighbor
+        // on the same level.
+        let mut parent = key.parent();
         while parent.level() > 0 {
             // Check that the key itself is there.
             assert!(all_keys.contains_key(&key));
             // Check that all its neighbours are there.
             for neighbor in parent.neighbours().iter().filter(|&key| key.is_valid()) {
-                if !all_keys.contains_key(neighbor) {
-                    println!(
-                        "Missing neighbor: {}. Key type {:#?}",
-                        neighbor,
-                        all_keys.get(&parent).unwrap()
-                    );
-                }
                 assert!(all_keys.contains_key(neighbor));
             }
             parent = parent.parent();
