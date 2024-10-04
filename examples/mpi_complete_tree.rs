@@ -73,6 +73,12 @@ pub fn main() {
         })
         .count();
 
+    if comm.size() == 0 {
+        assert_eq!(nghosts, 0);
+    } else {
+        assert!(nghosts > 0);
+    }
+
     let nglobal = all_keys
         .iter()
         .filter(|(_, &value)| matches!(value, KeyType::Global))

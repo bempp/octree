@@ -347,9 +347,9 @@ pub fn sort_to_bins<T: Ord>(sorted_keys: &[T], bins: &[T]) -> Vec<usize> {
 ///
 /// - The array `sorted_keys` is assumed to be sorted within each process. It needs not be globally sorted.
 /// - If there are `r` ranks in the communicator, the size of `bins` must be `r`.
-/// - The bins are defined through half-open intervals (bin[0], bin[1]), .... This defines r-1 bins. The
-///   last bin is the half-open interval [bin[r-1], \infty).
-/// - All array elements must be larger or equal bin[0]. This means that each element can be sorted into a bin.
+/// - The bins are defined through half-open intervals `(bin[0], bin[1])`, .... This defines r-1 bins. The
+///   last bin is the half-open interval `[bin[r-1], \infty)`.
+/// - All array elements must be larger or equal `bin[0]`. This means that each element can be sorted into a bin.
 pub fn redistribute_by_bins<T: Equivalence + Ord, C: CommunicatorCollectives>(
     sorted_keys: &[T],
     bins: &[T],
