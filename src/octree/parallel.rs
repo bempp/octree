@@ -864,10 +864,7 @@ pub fn assign_points_to_leaf_keys(
         let leaf_key = leaf_keys[leaf_key_index];
         debug_assert!(leaf_key.is_ancestor(*point_key));
 
-        point_map
-            .entry(leaf_key)
-            .or_insert(Vec::<usize>::new())
-            .push(index);
+        point_map.entry(leaf_key).or_default().push(index);
     }
 
     point_map
