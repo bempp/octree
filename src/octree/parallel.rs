@@ -851,6 +851,28 @@ pub fn get_key_index(arr: &[MortonKey], key: MortonKey) -> usize {
     }
 }
 
+/// Generate a map that associates each leaf with the corresponding point indices.
+pub fn assign_points_to_leaf_keys(
+    point_keys: &[MortonKey],
+    leaf_keys: &[MortonKey],
+) -> HashMap<MortonKey, Vec<usize>> {
+    let mut point_map = HashMap::<MortonKey, Vec<usize>>::new();
+
+    for (index, point_key) in point_keys.iter().enumerate() {
+        let leaf_key_index = get_key_index(leaf_keys, *point_key);
+
+        let leaf_key = leaf_keys[leaf_key_index];
+        debug_assert!(leaf_key.is_ancestor(*point_key));
+
+        point_map
+            .entry(leaf_key)
+            .or_insert(Vec::<usize>::new())
+            .push(index);
+    }
+
+    point_map
+}
+
 /// Check if a key is associated with the current rank.
 ///
 /// Note that the key does not need to exist as leaf. It just needs

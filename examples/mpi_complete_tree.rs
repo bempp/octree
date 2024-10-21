@@ -89,7 +89,23 @@ pub fn main() {
 
     assert_eq!(nglobals.iter().unique().count(), 1);
 
+    // Check that the points are associated with the correct leaf keys.
+    let mut npoints = 0;
+    let leaf_point_map = tree.leafs_to_point_indices();
+
+    for (key, point_indices) in leaf_point_map {
+        for &index in point_indices {
+            assert!(key.is_ancestor(tree.point_keys()[index]));
+        }
+        npoints += point_indices.len();
+    }
+
+    // Make sure that the number of points and point keys lines up
+    // with the points stored for each leaf key.
+    assert_eq!(npoints, tree.points().len());
+    assert_eq!(npoints, tree.point_keys().len());
+
     if comm.rank() == 0 {
-        println!("Distributed tree is complete and linear.");
+        println!("No errors were found in setting up tree.");
     }
 }

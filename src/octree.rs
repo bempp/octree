@@ -34,6 +34,7 @@ pub struct Octree<'o, C> {
     leaf_tree: Vec<MortonKey>,
     coarse_tree_bounds: Vec<MortonKey>,
     all_keys: HashMap<MortonKey, KeyType>,
+    leaf_keys_to_points: HashMap<MortonKey, Vec<usize>>,
     bounding_box: PhysicalBox,
     comm: &'o C,
 }
@@ -107,6 +108,8 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
 
         let all_keys = generate_all_keys(&leaf_tree, &coarse_tree, &coarse_tree_bounds, comm);
 
+        let leaf_keys_to_points = assign_points_to_leaf_keys(&point_keys, &leaf_tree);
+
         Self {
             points: points.to_vec(),
             point_keys,
@@ -114,6 +117,7 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
             leaf_tree,
             coarse_tree_bounds,
             all_keys,
+            leaf_keys_to_points,
             bounding_box,
             comm,
         }
@@ -145,6 +149,11 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     /// Return the leaf tree.
     pub fn leaf_tree(&self) -> &Vec<MortonKey> {
         &self.leaf_tree
+    }
+
+    /// Return the map from leaf keys to point indices
+    pub fn leafs_to_point_indices(&self) -> &HashMap<MortonKey, Vec<usize>> {
+        &self.leaf_keys_to_points
     }
 
     /// Get the coarse tree bounds.
