@@ -31,7 +31,7 @@ pub fn main() {
 
     // We now check that each node of the tree has all its neighbors available.
 
-    let leaf_tree = tree.leaf_tree();
+    let leaf_tree = tree.leaf_keys();
     let all_keys = tree.all_keys();
 
     assert!(is_complete_linear_and_balanced(leaf_tree, &comm));
@@ -91,7 +91,7 @@ pub fn main() {
 
     // Check that the points are associated with the correct leaf keys.
     let mut npoints = 0;
-    let leaf_point_map = tree.leafs_to_point_indices();
+    let leaf_point_map = tree.leaf_keys_to_local_point_indices();
 
     for (key, point_indices) in leaf_point_map {
         for &index in point_indices {

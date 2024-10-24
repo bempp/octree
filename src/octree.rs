@@ -17,7 +17,7 @@ use crate::{
     tools::gather_to_root,
 };
 
-/// Stores what type of key it is.
+/// Stores the type of the key relative to the octree.
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum KeyType {
     /// A local leaf.
@@ -34,11 +34,11 @@ pub enum KeyType {
 pub struct Octree<'o, C> {
     points: Vec<Point>,
     point_keys: Vec<MortonKey>,
-    coarse_tree: Vec<MortonKey>,
-    leaf_tree: Vec<MortonKey>,
+    coarse_tree_leafs: Vec<MortonKey>,
+    leaf_keys: Vec<MortonKey>,
     coarse_tree_bounds: Vec<MortonKey>,
     all_keys: HashMap<MortonKey, KeyType>,
-    leaf_keys_to_points: HashMap<MortonKey, Vec<usize>>,
+    leaf_keys_to_local_point_indices: HashMap<MortonKey, Vec<usize>>,
     bounding_box: PhysicalBox,
     comm: &'o C,
 }
@@ -47,9 +47,9 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     /// Create a new distributed Octree.
     ///
     /// # Arguments
-    /// `max_level` - The maximum level of the tree. The maximum level is 16.
-    /// `max_leaf_points` - The maximum number of points per leaf.
-    /// `comm` - The communicator.
+    /// - `max_level`: The maximum level of the tree. The maximum level is 16.
+    /// - `max_leaf_points`: The maximum number of points per leaf.
+    /// - `comm`: The communicator.
     ///
     /// # Returns
     /// A new Octree.
@@ -129,29 +129,31 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         Self {
             points: points.to_vec(),
             point_keys,
-            coarse_tree,
-            leaf_tree,
+            coarse_tree_leafs: coarse_tree,
+            leaf_keys: leaf_tree,
             coarse_tree_bounds,
             all_keys,
-            leaf_keys_to_points,
+            leaf_keys_to_local_point_indices: leaf_keys_to_points,
             bounding_box,
             comm,
         }
     }
 
-    /// Return the keys associated with the redistributed points.
+    /// Return the Morton keys associated with points.
     pub fn point_keys(&self) -> &Vec<MortonKey> {
         &self.point_keys
     }
 
     /// Return the bounding box.
+    ///
+    /// The bounding box is computed globally for the distributed octree.
     pub fn bounding_box(&self) -> &PhysicalBox {
         &self.bounding_box
     }
 
-    /// Return the associated coarse tree.
-    pub fn coarse_tree(&self) -> &Vec<MortonKey> {
-        &self.coarse_tree
+    /// Return the coarse tree leafs.
+    pub fn coarse_tree_leafs(&self) -> &Vec<MortonKey> {
+        &self.coarse_tree_leafs
     }
 
     /// Return the points.
@@ -162,14 +164,23 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         &self.points
     }
 
-    /// Return the leaf tree.
-    pub fn leaf_tree(&self) -> &Vec<MortonKey> {
-        &self.leaf_tree
+    /// Return the leaf nodes.
+    pub fn leaf_keys(&self) -> &Vec<MortonKey> {
+        &self.leaf_keys
     }
 
-    /// Return the map from leaf keys to point indices
-    pub fn leafs_to_point_indices(&self) -> &HashMap<MortonKey, Vec<usize>> {
-        &self.leaf_keys_to_points
+    /// Return the map from leaf keys to local point indices.
+    ///
+    /// This allows to find the points associated with a given key.
+    /// # Example
+    /// ```ignore
+    /// let leaf_map = octree.leaf_keys_to_local_point_indices();
+    /// let indices = leaf_map.get(&key);
+    /// let points_for_key = indices.iter().map(|&i| octree.points()[i]).collect::<Vec<_>>();
+    /// ```
+    /// Each point in `points_for_key` is contained in the leaf box defined by `key`.
+    pub fn leaf_keys_to_local_point_indices(&self) -> &HashMap<MortonKey, Vec<usize>> {
+        &self.leaf_keys_to_local_point_indices
     }
 
     /// Get the coarse tree bounds.
@@ -177,6 +188,16 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     /// This returns an array of size the number of ranks,
     /// where each element consists of the smallest Morton key in
     /// the corresponding rank.
+    ///
+    /// If a Morton key is on rank i with i not the last rank then
+    /// ```text
+    /// coarse_tree_bounds[i] <= key < coarse_tree_bounds[i+1]
+    /// ```
+    /// where as if i is the last rank then
+    /// ```text
+    /// coarse_tree_bounds[i] <= key
+    /// ```
+    /// This allows to find the rank of a given Morton key.
     pub fn coarse_tree_bounds(&self) -> &Vec<MortonKey> {
         &self.coarse_tree_bounds
     }
@@ -186,13 +207,28 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         self.comm
     }
 
-    /// Return a map of all keys.
+    /// Return a map of all leaf and interior keys.
+    ///
+    /// The map assigns each key a [KeyType] identifier. It is one of:
+    /// - [KeyType::LocalLeaf] for leaf keys
+    /// - [KeyType::LocalInterior] for interior keys
+    /// - [KeyType::Global] for global keys
+    /// - [KeyType::Ghost], a typed enum for keys that are adjacent to keys
+    ///   on the current rank but live on a different rank.
+    ///
+    /// Leaf keys have no children. Interior keys have children within the local rank.
+    /// Global keys are keys that are not uniquely assigned to a rank but exist on all ranks.
+    /// The global keys are those that are close to the root of the tree. By construction these
+    /// are the ancestors of the coarse tree leafs, where as the coarse tree leafs themselves are
+    /// the first level of keys distributed across ranks. Ghost keys are keys that are not local to
+    /// the current rank but lie along the interface to the current rank. Their identifiers store the value
+    /// of the rank that they originate from.
     pub fn all_keys(&self) -> &HashMap<MortonKey, KeyType> {
         &self.all_keys
     }
 }
 
-/// Check if tree is balanced.
+/// Test if an array of keys are the leafs of a complete linear and balanced tree.
 pub fn is_complete_linear_and_balanced<C: CommunicatorCollectives>(
     arr: &[MortonKey],
     comm: &C,

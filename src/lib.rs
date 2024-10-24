@@ -1,18 +1,20 @@
 //! A Rust based Octree library
 //!
-//! This library provides a single [Octree](crate::octree::Octree) data structure and utility routines
+//! This library provides a single [Octree] data structure and utility routines
 //! to work with Morton keys used for indexing Octrees.
 //!
 //! An Octree is a tree data structure in which each internal node has exactly eight children.
 //! Octrees are most often used to partition a three-dimensional space by recursively subdividing it into
 //! eight octants. Octrees are the 3D analog of quadtrees.
 //!
-//! The library supports Octrees on single nodes and distributed across multiple nodes via MPI.
-//! Each node inside on Octree is indexed through a [MortonKey](crate::morton::MortonKey). A Morton key is a
-//! 64 bit integer value that uniquely encodes the position of each node in an Octree.
+//! The library supports Octrees on single processes and distributed across multiple processes via MPI.
+//! Each node inside on Octree is indexed through a [MortonKey]. A Morton key is a
+//! 64 bit integer value that uniquely represents a node in an Octree.
 //!
-//! The library is designed to only provide the Octree data structure itself. It is up to the user to build algorithms
-//! around the data structure.
+//! The library is designed to only provide the Octree data structure itself by storing Morton keys, their relationship
+//! and the association of keys associated with leaf nodes to actual physical points.
+//!
+//! It is up to the user to build algorithms around the data structure.
 //!
 //! The Octrees provides by this library are adaptive and 2:1 balanced by default. This means that no neighbour of a node can be more than
 //! one level below or above the level of the node. This is a common property of Octrees used in scientific computing.
@@ -53,6 +55,22 @@
 //! the coarse tree as long as the number of points per leaf node exceeds the maximum. Once sufficiently
 //! refined the tree is 2:1 balanced again. The `octree` data structure stores the coarse tree and the
 //! fine leaf nodes of the octree.
+//!
+//! To now obtain the leaf nodes of the octree use
+//! ```ignore
+//! let leaf_keys = octree.leaf_keys();
+//! ```
+//! We can get the leaf nodes and interior nodes by calling
+//! ```ignore
+//! let all_keys = octree.all_keys();
+//! ```
+//! `all_keys` is a hash map marking a key as one of
+//! - [LocalLeaf](crate::octree::KeyType::LocalLeaf): A leaf key that is stored on the local node.
+//! - [LocalInterior](crate::octree::KeyType::LocalInterior): An interior key that is stored on the local node.
+//! - [Ghost(rank)](crate::octree::KeyType::Ghost): A ghost key that is adjacent to the local node and originates on the process with rank `rank`.
+//! - [Global](crate::octree::KeyType::Global): A global key that is stored on all processes. These are the ancestors of the coarse tree leafs.
+//!
+//! Each key in this library is a [Morton Key](MortonKey). For details of Morton keys see the description in the [morton] module.
 #![cfg_attr(feature = "strict", deny(warnings), deny(unused_crate_dependencies))]
 #![warn(missing_docs)]
 
@@ -61,9 +79,9 @@ pub mod geometry;
 pub mod morton;
 pub mod octree;
 pub mod parsort;
-//pub mod serial;
 pub mod tools;
 pub mod types;
 
 pub use crate::octree::Octree;
 pub use crate::tools::generate_random_points;
+pub use morton::MortonKey;
