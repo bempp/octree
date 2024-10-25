@@ -38,6 +38,7 @@ pub struct Octree<'o, C> {
     leaf_keys: Vec<MortonKey>,
     coarse_tree_bounds: Vec<MortonKey>,
     all_keys: HashMap<MortonKey, KeyType>,
+    neighbours: HashMap<MortonKey, Vec<MortonKey>>,
     leaf_keys_to_local_point_indices: HashMap<MortonKey, Vec<usize>>,
     bounding_box: PhysicalBox,
     comm: &'o C,
@@ -123,6 +124,7 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         // let coarse_tree = gather_to_all(&coarse_tree, comm);
 
         let all_keys = generate_all_keys(&leaf_tree, &coarse_tree, &coarse_tree_bounds, comm);
+        let neighbours = compute_neighbours(&all_keys);
 
         let leaf_keys_to_points = assign_points_to_leaf_keys(&point_keys, &leaf_tree);
 
@@ -133,6 +135,7 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
             leaf_keys: leaf_tree,
             coarse_tree_bounds,
             all_keys,
+            neighbours,
             leaf_keys_to_local_point_indices: leaf_keys_to_points,
             bounding_box,
             comm,
@@ -225,6 +228,14 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     /// of the rank that they originate from.
     pub fn all_keys(&self) -> &HashMap<MortonKey, KeyType> {
         &self.all_keys
+    }
+
+    /// Get the neighbour map.
+    ///
+    /// Returns a hash map that contains as keys all the keys obtained from [Octree::all_keys] except
+    /// those that are of type [KeyType::Ghost]. The values are the neighbours of the key.
+    pub fn neighbour_map(&self) -> &HashMap<MortonKey, Vec<MortonKey>> {
+        &self.neighbours
     }
 }
 

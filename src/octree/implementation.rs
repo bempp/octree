@@ -217,6 +217,29 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
     {
         // Check through that the first and last key of result are descendents
         // of the first and last coarse bloack.
+        let coarse_first = coarse_tree.first().unwrap();
+        let coarse_last = coarse_tree.last().unwrap();
+        let result_first = result.first().unwrap();
+        let result_last = result.last().unwrap();
+
+        if !coarse_first.is_ancestor(*result_first) {
+            println!(
+                "First key is not a descendent of the first coarse key. Rank: {}, First key: {}, First coarse key: {}",
+                comm.rank(),
+                result_first,
+                coarse_first
+            );
+        }
+
+        if !coarse_last.is_ancestor(*result_last) {
+            println!(
+                "Last key is not a descendent of the last coarse key. Rank: {}, Last key: {}, Last coarse key: {}",
+                comm.rank(),
+                result_last,
+                coarse_last
+            );
+        }
+
         debug_assert!(coarse_tree
             .first()
             .unwrap()
@@ -922,6 +945,68 @@ pub fn generate_all_keys<C: CommunicatorCollectives>(
     }
 
     all_keys
+}
+
+/// Compute the neighbours of all non-ghost keys.
+pub fn compute_neighbours(
+    all_keys: &HashMap<MortonKey, KeyType>,
+) -> HashMap<MortonKey, Vec<MortonKey>> {
+    let mut neighbours = HashMap::<MortonKey, Vec<MortonKey>>::new();
+    for (key, key_type) in all_keys
+        .iter()
+        .filter(|(_, key_type)| !matches!(key_type, KeyType::Ghost(_)))
+    {
+        if *key_type == KeyType::LocalInterior || (*key_type == KeyType::Global) {
+            // For interior keys there always exists neighbours on the same level since the tree is balanced.
+            neighbours.insert(
+                *key,
+                key.neighbours()
+                    .iter()
+                    .copied()
+                    .filter(|key| key.is_valid())
+                    .collect_vec(),
+            );
+            continue;
+        }
+
+        // For leaf keys we need to check if the neighbours exist on the same level, above or below.
+
+        if *key_type == KeyType::LocalLeaf {
+            for neighbour in key
+                .neighbours()
+                .iter()
+                .copied()
+                .filter(|key| key.is_valid())
+            {
+                if all_keys.contains_key(&neighbour) {
+                    // The easy case. Just add the neighbour.
+                    neighbours.entry(*key).or_default().push(neighbour);
+                } else if all_keys.contains_key(&neighbour.parent()) {
+                    // The neighbour is on the next level closer to root.
+                    // Note, we cannot mistakenly add the parent of a sibling since the tree is complete.
+                    neighbours.entry(*key).or_default().push(neighbour.parent());
+                } else {
+                    // We take children of the neighbour and take each child that is neighbour to a child
+                    // of the current key.
+                    for neighbour_child in neighbour.children() {
+                        for neighbour_child_neighbour in neighbour_child
+                            .neighbours()
+                            .iter()
+                            .filter(|key| key.is_valid())
+                        {
+                            if neighbour_child_neighbour.parent() == *key {
+                                println!("Added deeper neighbour");
+                                debug_assert!(all_keys.contains_key(&neighbour_child));
+                                neighbours.entry(*key).or_default().push(neighbour_child);
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+    }
+    neighbours
 }
 
 #[cfg(test)]

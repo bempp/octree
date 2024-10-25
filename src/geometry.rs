@@ -22,6 +22,11 @@ impl Point {
         self.coords
     }
 
+    /// Return a mutable pointer to the coordinates.
+    pub fn coords_mut(&mut self) -> &mut [f64; 3] {
+        &mut self.coords
+    }
+
     /// Return the global id of the point.
     pub fn global_id(&self) -> usize {
         self.global_id

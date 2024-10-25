@@ -25,7 +25,17 @@ pub fn main() {
 
     // Generate random points.
 
-    let points = generate_random_points(npoints, &mut rng, &comm);
+    let mut points = generate_random_points(npoints, &mut rng, &comm);
+    // Make sure that the points live on the unit sphere.
+    for point in points.iter_mut() {
+        let len = point.coords()[0] * point.coords()[0]
+            + point.coords()[1] * point.coords()[1]
+            + point.coords()[2] * point.coords()[2];
+        let len = len.sqrt();
+        point.coords_mut()[0] /= len;
+        point.coords_mut()[1] /= len;
+        point.coords_mut()[2] /= len;
+    }
 
     let tree = Octree::new(&points, 15, 50, &comm);
 
@@ -104,6 +114,22 @@ pub fn main() {
     // with the points stored for each leaf key.
     assert_eq!(npoints, tree.points().len());
     assert_eq!(npoints, tree.point_keys().len());
+
+    // Check the neighbour relationships.
+
+    let all_neighbours = tree.neighbour_map();
+    let all_keys = tree.all_keys();
+
+    for (key, key_type) in all_keys {
+        // Ghost keys should not be in the neighbour map.
+        match key_type {
+            KeyType::Ghost(_) => assert!(!all_neighbours.contains_key(key)),
+            _ => {
+                // If it is not a ghost the key should be in the neighbour map.
+                assert!(all_neighbours.contains_key(key));
+            }
+        }
+    }
 
     if comm.rank() == 0 {
         println!("No errors were found in setting up tree.");
