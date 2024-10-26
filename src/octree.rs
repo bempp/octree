@@ -237,6 +237,42 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     pub fn neighbour_map(&self) -> &HashMap<MortonKey, Vec<MortonKey>> {
         &self.neighbours
     }
+
+    /// Return the local number of points in the octree.
+    pub fn local_number_of_points(&self) -> usize {
+        self.points.len()
+    }
+
+    /// Return the global number of points in the octree.
+    pub fn global_number_of_points(&self) -> usize {
+        let mut global_num_points = 0;
+        self.comm.all_reduce_into(
+            &self.local_number_of_points(),
+            &mut global_num_points,
+            SystemOperation::sum(),
+        );
+        global_num_points
+    }
+
+    /// Return the local maximum level
+    pub fn local_max_level(&self) -> usize {
+        self.leaf_keys
+            .iter()
+            .map(|key| key.level())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Return the global maximum level
+    pub fn global_max_level(&self) -> usize {
+        let mut global_max_level = 0;
+        self.comm.all_reduce_into(
+            &self.local_max_level(),
+            &mut global_max_level,
+            SystemOperation::max(),
+        );
+        global_max_level
+    }
 }
 
 /// Test if an array of keys are the leafs of a complete linear and balanced tree.

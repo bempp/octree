@@ -2,15 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(debug_assertions)]
+use crate::tools::is_sorted_array;
 use crate::{
     constants::{DEEPEST_LEVEL, NSIBLINGS},
     geometry::{PhysicalBox, Point},
     morton::MortonKey,
     parsort::parsort,
-    tools::{
-        communicate_back, gather_to_all, global_inclusive_cumsum, is_sorted_array, redistribute,
-        sort_to_bins,
-    },
+    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute, sort_to_bins},
 };
 
 use mpi::traits::{Equivalence, Root};

@@ -1,11 +1,8 @@
-//! Test the computation of a complete octree.
+//! Demonstrate the instantiation of a complete octree using MPI.
 
-use bempp_octree::{
-    morton::MortonKey,
-    octree::{is_complete_linear_and_balanced, KeyType, Octree},
-    tools::{gather_to_all, generate_random_points},
-};
-use itertools::Itertools;
+use std::time::Instant;
+
+use bempp_octree::{generate_random_points, Octree};
 use mpi::traits::Communicator;
 use rand::prelude::*;
 use rand_chacha::ChaCha8Rng;
@@ -21,9 +18,9 @@ pub fn main() {
     let mut rng = ChaCha8Rng::seed_from_u64(comm.rank() as u64);
 
     // Create `npoints` per rank.
-    let npoints = 10000;
+    let npoints = 1000000;
 
-    // Generate random points.
+    // Generate random points on the positive octant of the unit sphere.
 
     let mut points = generate_random_points(npoints, &mut rng, &comm);
     // Make sure that the points live on the unit sphere.
@@ -37,101 +34,21 @@ pub fn main() {
         point.coords_mut()[2] /= len;
     }
 
-    let tree = Octree::new(&points, 15, 50, &comm);
+    let start = Instant::now();
+    let octree = Octree::new(&points, 15, 50, &comm);
+    let duration = start.elapsed();
+
+    let global_number_of_points = octree.global_number_of_points();
+    let global_max_level = octree.global_max_level();
 
     // We now check that each node of the tree has all its neighbors available.
 
-    let leaf_tree = tree.leaf_keys();
-    let all_keys = tree.all_keys();
-
-    assert!(is_complete_linear_and_balanced(leaf_tree, &comm));
-    for &key in leaf_tree {
-        // We only check interior keys. Leaf keys may not have a neighbor
-        // on the same level.
-        let mut parent = key.parent();
-        while parent.level() > 0 {
-            // Check that the key itself is there.
-            assert!(all_keys.contains_key(&key));
-            // Check that all its neighbours are there.
-            for neighbor in parent.neighbours().iter().filter(|&key| key.is_valid()) {
-                assert!(all_keys.contains_key(neighbor));
-            }
-            parent = parent.parent();
-            // Check that the parent is there.
-            assert!(all_keys.contains_key(&parent));
-        }
-    }
-
-    // At the end check that the root of the tree is also contained.
-    assert!(all_keys.contains_key(&MortonKey::root()));
-
-    // Count the number of ghosts on each rank
-    // Count the number of global keys on each rank.
-
-    // Assert that all ghosts are from a different rank and count them.
-
-    let nghosts = all_keys
-        .iter()
-        .filter_map(|(_, &value)| {
-            if let KeyType::Ghost(rank) = value {
-                assert!(rank != comm.size() as usize);
-                Some(rank)
-            } else {
-                None
-            }
-        })
-        .count();
-
-    if comm.size() == 1 {
-        assert_eq!(nghosts, 0);
-    } else {
-        assert!(nghosts > 0);
-    }
-
-    let nglobal = all_keys
-        .iter()
-        .filter(|(_, &value)| matches!(value, KeyType::Global))
-        .count();
-
-    // Assert that all globals across all ranks have the same count.
-
-    let nglobals = gather_to_all(std::slice::from_ref(&nglobal), &comm);
-
-    assert_eq!(nglobals.iter().unique().count(), 1);
-
-    // Check that the points are associated with the correct leaf keys.
-    let mut npoints = 0;
-    let leaf_point_map = tree.leaf_keys_to_local_point_indices();
-
-    for (key, point_indices) in leaf_point_map {
-        for &index in point_indices {
-            assert!(key.is_ancestor(tree.point_keys()[index]));
-        }
-        npoints += point_indices.len();
-    }
-
-    // Make sure that the number of points and point keys lines up
-    // with the points stored for each leaf key.
-    assert_eq!(npoints, tree.points().len());
-    assert_eq!(npoints, tree.point_keys().len());
-
-    // Check the neighbour relationships.
-
-    let all_neighbours = tree.neighbour_map();
-    let all_keys = tree.all_keys();
-
-    for (key, key_type) in all_keys {
-        // Ghost keys should not be in the neighbour map.
-        match key_type {
-            KeyType::Ghost(_) => assert!(!all_neighbours.contains_key(key)),
-            _ => {
-                // If it is not a ghost the key should be in the neighbour map.
-                assert!(all_neighbours.contains_key(key));
-            }
-        }
-    }
-
     if comm.rank() == 0 {
-        println!("No errors were found in setting up tree.");
+        println!(
+            "Setup octree with {} points and maximum level {} in {} ms",
+            global_number_of_points,
+            global_max_level,
+            duration.as_millis()
+        );
     }
 }

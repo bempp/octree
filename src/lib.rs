@@ -70,6 +70,15 @@
 //! - [Ghost(rank)](crate::octree::KeyType::Ghost): A ghost key that is adjacent to the local node and originates on the process with rank `rank`.
 //! - [Global](crate::octree::KeyType::Global): A global key that is stored on all processes. These are the ancestors of the coarse tree leafs.
 //!
+//! An important property in octrees is the neighbour relationship. To get a hash map that stores the neighbours for each non-ghost key
+//! use
+//! ```ignore
+//! let neighbour_map = octree.neighbour_map();
+//! ```
+//! The `neighbour_map` stores for each non-ghost key a vector of keys that are adjacent to the neighbour. Neighbours need not
+//! necesssarily be at the same level in the tree. Only for interior keys neighbours are guaranteed to be at the same level. For leaf keys
+//! neighbours may be one level higher or lower.
+//!
 //! Each key in this library is a [Morton Key](MortonKey). For details of Morton keys see the description in the [morton] module.
 #![cfg_attr(feature = "strict", deny(warnings), deny(unused_crate_dependencies))]
 #![warn(missing_docs)]
@@ -82,6 +91,7 @@ pub mod parsort;
 pub mod tools;
 pub mod types;
 
+pub use crate::geometry::{PhysicalBox, Point};
 pub use crate::octree::Octree;
 pub use crate::tools::generate_random_points;
 pub use morton::MortonKey;

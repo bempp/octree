@@ -5,7 +5,7 @@ battleship = []
 
 [package]
 name = "bempp-octree"
-version = "0.0.1-dev"
+version = "0.1.0"
 edition = "2021"
 authors = [
     "Srinath Kailasa <srinathkailasa@gmail.com>, Timo Betcke <timo.betcke@gmail.com>",
@@ -27,7 +27,6 @@ itertools = "0.13.*"
 rand = { version = "0.8.5", features = ["alloc"] }
 rand_chacha = "0.3.*"
 num = "0.4.*"
-vtkio = "0.6.*"
 mpi = { version = "0.8.*", features = ["derive", "user-operations"] }
 
 [profile.release]
@@ -35,7 +34,6 @@ debug = 1
 
 [dev-dependencies]
 rand_distr = "0.4.3"
-#criterion = { version = "0.5.*", features = ["html_reports"]}
 
 [build-dependencies]
 cbindgen = "0.27.0"

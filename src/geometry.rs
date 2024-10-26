@@ -4,7 +4,11 @@ use mpi::traits::Equivalence;
 
 use crate::constants::DEEPEST_LEVEL;
 
-/// Definition of a point.
+/// Definition of a point in 3d space.
+///
+/// A point consists of three coordinates and a global id.
+/// The global id makes it easier to identify points as they
+/// are distributed across MPI nodes.
 #[derive(Clone, Copy, Equivalence)]
 pub struct Point {
     coords: [f64; 3],
@@ -47,6 +51,9 @@ impl PhysicalBox {
     }
 
     /// Give a slice of points. Compute an associated bounding box.
+    ///
+    /// The created bounding box is slightly bigger than the actual point set.
+    /// This is to make sure that no point lies exactly on the boundary of the box.
     pub fn from_points(points: &[Point]) -> PhysicalBox {
         let mut xmin = f64::MAX;
         let mut xmax = f64::MIN;
