@@ -33,7 +33,6 @@ mpi = { version = "0.8.*", features = ["derive", "user-operations"] }
 debug = 1
 
 [dev-dependencies]
-rand_distr = "0.4.3"
 
 [build-dependencies]
 cbindgen = "0.27.0"
