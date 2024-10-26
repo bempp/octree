@@ -7,7 +7,10 @@ use crate::{
     geometry::{PhysicalBox, Point},
     morton::MortonKey,
     parsort::parsort,
-    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute, sort_to_bins},
+    tools::{
+        communicate_back, gather_to_all, global_inclusive_cumsum, is_sorted_array, redistribute,
+        sort_to_bins,
+    },
 };
 
 use mpi::traits::{Equivalence, Root};
@@ -215,39 +218,22 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 
     #[cfg(debug_assertions)]
     {
-        // Check through that the first and last key of result are descendents
-        // of the first and last coarse bloack.
-        let coarse_first = coarse_tree.first().unwrap();
-        let coarse_last = coarse_tree.last().unwrap();
-        let result_first = result.first().unwrap();
-        let result_last = result.last().unwrap();
+        // Check through that the first and last key of result are contained
+        // in the intervals given by the coarse tree.
 
-        if !coarse_first.is_ancestor(*result_first) {
-            println!(
-                "First key is not a descendent of the first coarse key. Rank: {}, First key: {}, First coarse key: {}",
-                comm.rank(),
-                result_first,
-                coarse_first
-            );
-        }
+        // Check that the result array is sorted.
+        debug_assert!(is_sorted_array(&result, comm));
 
-        if !coarse_last.is_ancestor(*result_last) {
-            println!(
-                "Last key is not a descendent of the last coarse key. Rank: {}, Last key: {}, Last coarse key: {}",
-                comm.rank(),
-                result_last,
-                coarse_last
-            );
-        }
+        // Check that the first and last result key are within the bounds.
 
-        debug_assert!(coarse_tree
-            .first()
-            .unwrap()
-            .is_ancestor(*result.first().unwrap()));
-        debug_assert!(coarse_tree
-            .last()
-            .unwrap()
-            .is_ancestor(*result.last().unwrap()));
+        debug_assert!(coarse_tree.first().unwrap() <= result.first().unwrap());
+        debug_assert!(
+            result.last().unwrap() < coarse_tree.last().unwrap()
+                || coarse_tree
+                    .last()
+                    .unwrap()
+                    .is_ancestor(*result.last().unwrap())
+        );
     }
 
     result
