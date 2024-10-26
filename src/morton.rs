@@ -1,4 +1,15 @@
-//! Routines for working with Morton indices.
+//! Routines for working with Morton keys.
+//!
+//! A Morton key is a 64 bit integer that uniquely encodes a node of an octree. This module
+//! defines methods for working with Morton keys. Morton keys within this library support
+//! octree data structures up to a depth of level 16, meaning we have on the deepest level
+//! indices from 0 to 65535 in each direction. An octree node has 8 children meaning per level we
+//! require 3 bits to uniquely identify a descendent. Hence, in total we require 48 bits. In addition
+//! we have reserved 15 bits for level information, which is more than required. The level information
+//! is stored in the lowest 15 bits and the index information is stored in the next 48 bits. Hence,
+//! a valid key requires 63 bits. We use bit 64 to indicate an invalid key. If bit 64 is 1 then the
+//! key is invalid. This is useful for initializing arrays of Morton keys with default values. The default
+//! value of a Morton key is an invalid key.
 
 use crate::constants::{
     BYTE_DISPLACEMENT, BYTE_MASK, DEEPEST_LEVEL, DIRECTIONS, LEVEL_DISPLACEMENT, LEVEL_MASK,
@@ -42,7 +53,7 @@ impl MortonKey {
         Self { value: u64::MAX }
     }
 
-    /// Check if a key is invalid.
+    /// Create an invalid key.
     pub fn invalid_key() -> Self {
         Self { value: 1 << 63 }
     }
@@ -56,19 +67,25 @@ impl MortonKey {
         self.value >> 63 != 1
     }
 
-    /// Create a root key
+    /// Create a root key.
+    ///
+    /// A root key simply has the value `0`.
     #[inline(always)]
     pub fn root() -> MortonKey {
         Self { value: 0 }
     }
 
     /// Return the first deepest key.
+    ///
+    /// This is the first key on the deepest level.
     #[inline(always)]
     pub fn deepest_first() -> Self {
         MortonKey::from_index_and_level([0, 0, 0], DEEPEST_LEVEL as usize)
     }
 
     /// Return the last deepest key.
+    ///
+    /// This is the last key on the deepest level.
     #[inline(always)]
     pub fn deepest_last() -> Self {
         MortonKey::from_index_and_level(
@@ -81,7 +98,10 @@ impl MortonKey {
         )
     }
 
-    /// Return the associated physical box with respect to a bounding box.
+    /// Return the associated physical box.
+    ///
+    /// Given the physical boundix bos of the octree this method returns the
+    /// physical box associated with the key.
     #[inline(always)]
     pub fn physical_box(&self, bounding_box: &PhysicalBox) -> PhysicalBox {
         let (level, [x, y, z]) = self.decode();
@@ -108,6 +128,7 @@ impl MortonKey {
     /// Return key in a given direction.
     ///
     /// Returns an invalid key if there is no valid key in that direction.
+    #[inline(always)]
     pub fn key_in_direction(&self, direction: [i64; 3]) -> MortonKey {
         let (level, [x, y, z]) = self.decode();
         let level_size = 1 << level;
@@ -154,7 +175,9 @@ impl MortonKey {
     }
 
     /// Map a physical point within a bounding box to a Morton key on a given level.
+    ///
     /// It is assumed that points are strictly contained within the bounding box.
+    #[inline(always)]
     pub fn from_physical_point(point: Point, bounding_box: &PhysicalBox, level: usize) -> Self {
         let level_size = 1 << level;
         let reference = bounding_box.physical_to_reference(point.coords());
@@ -166,6 +189,8 @@ impl MortonKey {
     }
 
     /// Create a new key by providing the [x, y, z] index and a level.
+    ///
+    /// This is the preferred way to create a new Morton key.
     pub fn from_index_and_level(index: [usize; 3], level: usize) -> MortonKey {
         let level = level as u64;
         debug_assert!(level <= DEEPEST_LEVEL);
@@ -252,8 +277,8 @@ impl MortonKey {
 
     /// Return ancestor of key on specified level
     ///
-    /// Return None if level > self.level().
-    /// Return the key itself if level == self.level().
+    /// Return None if `level > self.level()`.
+    /// Return the key itself if `level == self.level()`.
     pub fn ancestor_at_level(&self, level: usize) -> Option<Self> {
         let my_level = self.level();
 
@@ -304,6 +329,7 @@ impl MortonKey {
     /// Return the finest common ancestor of two keys.
     ///
     /// If the keys are identical return the key itself.
+    #[inline(always)]
     pub fn finest_common_ancestor(&self, other: MortonKey) -> MortonKey {
         if *self == other {
             return *self;
@@ -375,6 +401,7 @@ impl MortonKey {
     /// Return the 8 siblings of a key.
     ///
     /// The key itself is part of the siblings.
+    #[inline(always)]
     pub fn siblings(&self) -> [MortonKey; 8] {
         assert!(!self.is_root());
         self.parent().children()
@@ -385,6 +412,7 @@ impl MortonKey {
     /// The key itself is not part of the neighbours.
     /// If along a certain direction there is no neighbour then
     ///  an invalid key is stored.
+    #[inline(always)]
     pub fn neighbours(&self) -> [MortonKey; 26] {
         let mut result = [MortonKey::default(); 26];
 
@@ -435,6 +463,7 @@ impl MortonKey {
     }
 
     /// Return the finest descendent that is opposite to the joint corner with the siblings.
+    #[inline(always)]
     pub fn finest_outer_descendent(&self) -> MortonKey {
         // First find out which child the current key is.
 

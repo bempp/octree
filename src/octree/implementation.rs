@@ -2,15 +2,14 @@
 
 use std::collections::{HashMap, HashSet};
 
+#[cfg(debug_assertions)]
+use crate::tools::is_sorted_array;
 use crate::{
     constants::{DEEPEST_LEVEL, NSIBLINGS},
     geometry::{PhysicalBox, Point},
     morton::MortonKey,
     parsort::parsort,
-    tools::{
-        communicate_back, gather_to_all, gather_to_root, global_inclusive_cumsum, redistribute,
-        sort_to_bins,
-    },
+    tools::{communicate_back, gather_to_all, global_inclusive_cumsum, redistribute, sort_to_bins},
 };
 
 use mpi::traits::{Equivalence, Root};
@@ -20,85 +19,6 @@ use mpi::{collective::SystemOperation, traits::CommunicatorCollectives};
 use rand::Rng;
 
 use super::KeyType;
-
-/// Compute the global bounding box across all points on all processes.
-pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
-    points: &[Point],
-    comm: &C,
-) -> PhysicalBox {
-    // Make sure that the points array is a multiple of 3.
-
-    // Now compute the minimum and maximum across each dimension.
-
-    let mut xmin = f64::MAX;
-    let mut xmax = f64::MIN;
-
-    let mut ymin = f64::MAX;
-    let mut ymax = f64::MIN;
-
-    let mut zmin = f64::MAX;
-    let mut zmax = f64::MIN;
-
-    for point in points {
-        let x = point.coords()[0];
-        let y = point.coords()[1];
-        let z = point.coords()[2];
-
-        xmin = f64::min(xmin, x);
-        xmax = f64::max(xmax, x);
-
-        ymin = f64::min(ymin, y);
-        ymax = f64::max(ymax, y);
-
-        zmin = f64::min(zmin, z);
-        zmax = f64::max(zmax, z);
-    }
-
-    let mut global_xmin = 0.0;
-    let mut global_xmax = 0.0;
-
-    let mut global_ymin = 0.0;
-    let mut global_ymax = 0.0;
-
-    let mut global_zmin = 0.0;
-    let mut global_zmax = 0.0;
-
-    comm.all_reduce_into(&xmin, &mut global_xmin, SystemOperation::min());
-    comm.all_reduce_into(&xmax, &mut global_xmax, SystemOperation::max());
-
-    comm.all_reduce_into(&ymin, &mut global_ymin, SystemOperation::min());
-    comm.all_reduce_into(&ymax, &mut global_ymax, SystemOperation::max());
-
-    comm.all_reduce_into(&zmin, &mut global_zmin, SystemOperation::min());
-    comm.all_reduce_into(&zmax, &mut global_zmax, SystemOperation::max());
-
-    let xdiam = global_xmax - global_xmin;
-    let ydiam = global_ymax - global_ymin;
-    let zdiam = global_zmax - global_zmin;
-
-    let xmean = global_xmin + 0.5 * xdiam;
-    let ymean = global_ymin + 0.5 * ydiam;
-    let zmean = global_zmin + 0.5 * zdiam;
-
-    // We increase diameters by box size on deepest level
-    // and use the maximum diameter to compute a
-    // cubic bounding box.
-
-    let deepest_box_diam = 1.0 / (1 << DEEPEST_LEVEL) as f64;
-
-    let max_diam = [xdiam, ydiam, zdiam].into_iter().reduce(f64::max).unwrap();
-
-    let max_diam = max_diam * (1.0 + deepest_box_diam);
-
-    PhysicalBox::new([
-        xmean - 0.5 * max_diam,
-        ymean - 0.5 * max_diam,
-        zmean - 0.5 * max_diam,
-        xmean + 0.5 * max_diam,
-        ymean + 0.5 * max_diam,
-        zmean + 0.5 * max_diam,
-    ])
-}
 
 /// Convert points to Morton keys on specified level.
 pub fn points_to_morton<C: CommunicatorCollectives>(
@@ -115,7 +35,7 @@ pub fn points_to_morton<C: CommunicatorCollectives>(
 
     // Compute the physical bounding box.
 
-    let bounding_box = compute_global_bounding_box(points, comm);
+    let bounding_box = crate::octree::compute_global_bounding_box(points, comm);
 
     // Bunch the points in arrays of 3.
 
@@ -297,16 +217,22 @@ pub fn redistribute_with_respect_to_coarse_tree<C: CommunicatorCollectives>(
 
     #[cfg(debug_assertions)]
     {
-        // Check through that the first and last key of result are descendents
-        // of the first and last coarse bloack.
-        debug_assert!(coarse_tree
-            .first()
-            .unwrap()
-            .is_ancestor(*result.first().unwrap()));
-        debug_assert!(coarse_tree
-            .last()
-            .unwrap()
-            .is_ancestor(*result.last().unwrap()));
+        // Check through that the first and last key of result are contained
+        // in the intervals given by the coarse tree.
+
+        // Check that the result array is sorted.
+        debug_assert!(is_sorted_array(&result, comm));
+
+        // Check that the first and last result key are within the bounds.
+
+        debug_assert!(coarse_tree.first().unwrap() <= result.first().unwrap());
+        debug_assert!(
+            result.last().unwrap() < coarse_tree.last().unwrap()
+                || coarse_tree
+                    .last()
+                    .unwrap()
+                    .is_ancestor(*result.last().unwrap())
+        );
     }
 
     result
@@ -613,7 +539,9 @@ pub fn balance<R: Rng, C: CommunicatorCollectives>(
 
     let result = linearize(&result, rng, comm);
 
-    debug_assert!(is_complete_linear_and_balanced(&result, comm));
+    debug_assert!(crate::octree::is_complete_linear_and_balanced(
+        &result, comm
+    ));
     result
 }
 
@@ -807,24 +735,6 @@ pub fn deepest_level<C: CommunicatorCollectives>(keys: &[MortonKey], comm: &C) -
     global_deepest_level
 }
 
-/// Check if tree is balanced.
-pub fn is_complete_linear_and_balanced<C: CommunicatorCollectives>(
-    arr: &[MortonKey],
-    comm: &C,
-) -> bool {
-    // Send the tree to the root node and check there that it is balanced.
-
-    let mut balanced = false;
-
-    if let Some(arr) = gather_to_root(arr, comm) {
-        balanced = MortonKey::is_complete_linear_and_balanced(&arr);
-    }
-
-    comm.process_at_rank(0).broadcast_into(&mut balanced);
-
-    balanced
-}
-
 /// For a complete linear bin get on each process the first key of all processes.
 ///
 /// This information can be used to query on which process a key is living.
@@ -870,22 +780,22 @@ pub fn assign_points_to_leaf_keys(
     point_map
 }
 
-/// Check if a key is associated with the current rank.
-///
-/// Note that the key does not need to exist as leaf. It just needs
-/// to be descendent of a coarse key on the current rank.
-pub fn key_on_current_rank(
-    key: MortonKey,
-    coarse_tree_bounds: &[MortonKey],
-    rank: usize,
-    size: usize,
-) -> bool {
-    if rank == size - 1 {
-        key >= *coarse_tree_bounds.last().unwrap()
-    } else {
-        coarse_tree_bounds[rank] <= key && key < coarse_tree_bounds[rank + 1]
-    }
-}
+// /// Check if a key is associated with the current rank.
+// ///
+// /// Note that the key does not need to exist as leaf. It just needs
+// /// to be descendent of a coarse key on the current rank.
+// pub fn key_on_current_rank(
+//     key: MortonKey,
+//     coarse_tree_bounds: &[MortonKey],
+//     rank: usize,
+//     size: usize,
+// ) -> bool {
+//     if rank == size - 1 {
+//         key >= *coarse_tree_bounds.last().unwrap()
+//     } else {
+//         coarse_tree_bounds[rank] <= key && key < coarse_tree_bounds[rank + 1]
+//     }
+// }
 
 /// Generate all leaf and interior keys.
 pub fn generate_all_keys<C: CommunicatorCollectives>(
@@ -1020,6 +930,68 @@ pub fn generate_all_keys<C: CommunicatorCollectives>(
     }
 
     all_keys
+}
+
+/// Compute the neighbours of all non-ghost keys.
+pub fn compute_neighbours(
+    all_keys: &HashMap<MortonKey, KeyType>,
+) -> HashMap<MortonKey, Vec<MortonKey>> {
+    let mut neighbours = HashMap::<MortonKey, Vec<MortonKey>>::new();
+    for (key, key_type) in all_keys
+        .iter()
+        .filter(|(_, key_type)| !matches!(key_type, KeyType::Ghost(_)))
+    {
+        if *key_type == KeyType::LocalInterior || (*key_type == KeyType::Global) {
+            // For interior keys there always exists neighbours on the same level since the tree is balanced.
+            neighbours.insert(
+                *key,
+                key.neighbours()
+                    .iter()
+                    .copied()
+                    .filter(|key| key.is_valid())
+                    .collect_vec(),
+            );
+            continue;
+        }
+
+        // For leaf keys we need to check if the neighbours exist on the same level, above or below.
+
+        if *key_type == KeyType::LocalLeaf {
+            for neighbour in key
+                .neighbours()
+                .iter()
+                .copied()
+                .filter(|key| key.is_valid())
+            {
+                if all_keys.contains_key(&neighbour) {
+                    // The easy case. Just add the neighbour.
+                    neighbours.entry(*key).or_default().push(neighbour);
+                } else if all_keys.contains_key(&neighbour.parent()) {
+                    // The neighbour is on the next level closer to root.
+                    // Note, we cannot mistakenly add the parent of a sibling since the tree is complete.
+                    neighbours.entry(*key).or_default().push(neighbour.parent());
+                } else {
+                    // We take children of the neighbour and take each child that is neighbour to a child
+                    // of the current key.
+                    for neighbour_child in neighbour.children() {
+                        for neighbour_child_neighbour in neighbour_child
+                            .neighbours()
+                            .iter()
+                            .filter(|key| key.is_valid())
+                        {
+                            if neighbour_child_neighbour.parent() == *key {
+                                println!("Added deeper neighbour");
+                                debug_assert!(all_keys.contains_key(&neighbour_child));
+                                neighbours.entry(*key).or_default().push(neighbour_child);
+                            }
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+    }
+    neighbours
 }
 
 #[cfg(test)]

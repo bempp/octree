@@ -1,9 +1,12 @@
 //! Definition of Octree.
-pub mod parallel;
+mod implementation;
 use std::collections::HashMap;
 
-use mpi::traits::CommunicatorCollectives;
-pub use parallel::*;
+pub(crate) use implementation::*;
+use mpi::{
+    collective::SystemOperation,
+    traits::{CommunicatorCollectives, Root},
+};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -11,9 +14,10 @@ use crate::{
     constants::DEEPEST_LEVEL,
     geometry::{PhysicalBox, Point},
     morton::MortonKey,
+    tools::gather_to_root,
 };
 
-/// Stores what type of key it is.
+/// Stores the type of the key relative to the octree.
 #[derive(PartialEq, Eq, Hash, Copy, Clone, Debug)]
 pub enum KeyType {
     /// A local leaf.
@@ -30,17 +34,30 @@ pub enum KeyType {
 pub struct Octree<'o, C> {
     points: Vec<Point>,
     point_keys: Vec<MortonKey>,
-    coarse_tree: Vec<MortonKey>,
-    leaf_tree: Vec<MortonKey>,
+    coarse_tree_leafs: Vec<MortonKey>,
+    leaf_keys: Vec<MortonKey>,
     coarse_tree_bounds: Vec<MortonKey>,
     all_keys: HashMap<MortonKey, KeyType>,
-    leaf_keys_to_points: HashMap<MortonKey, Vec<usize>>,
+    neighbours: HashMap<MortonKey, Vec<MortonKey>>,
+    leaf_keys_to_local_point_indices: HashMap<MortonKey, Vec<usize>>,
     bounding_box: PhysicalBox,
     comm: &'o C,
 }
 
 impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     /// Create a new distributed Octree.
+    ///
+    /// # Arguments
+    /// - `max_level`: The maximum level of the tree. The maximum level is 16.
+    /// - `max_leaf_points`: The maximum number of points per leaf.
+    /// - `comm`: The communicator.
+    ///
+    /// # Returns
+    /// A new Octree.
+    ///
+    /// # Note
+    /// The points are redistributed during construction of the octree. The tree stores
+    /// the redistributed points and the corresponding Morton keys.
     pub fn new(points: &[Point], max_level: usize, max_leaf_points: usize, comm: &'o C) -> Self {
         // We need a random number generator for sorting. For simplicity we use a ChaCha8 random number generator
         // seeded with the rank of the process.
@@ -107,35 +124,39 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         // let coarse_tree = gather_to_all(&coarse_tree, comm);
 
         let all_keys = generate_all_keys(&leaf_tree, &coarse_tree, &coarse_tree_bounds, comm);
+        let neighbours = compute_neighbours(&all_keys);
 
         let leaf_keys_to_points = assign_points_to_leaf_keys(&point_keys, &leaf_tree);
 
         Self {
             points: points.to_vec(),
             point_keys,
-            coarse_tree,
-            leaf_tree,
+            coarse_tree_leafs: coarse_tree,
+            leaf_keys: leaf_tree,
             coarse_tree_bounds,
             all_keys,
-            leaf_keys_to_points,
+            neighbours,
+            leaf_keys_to_local_point_indices: leaf_keys_to_points,
             bounding_box,
             comm,
         }
     }
 
-    /// Return the keys associated with the redistributed points.
+    /// Return the Morton keys associated with points.
     pub fn point_keys(&self) -> &Vec<MortonKey> {
         &self.point_keys
     }
 
     /// Return the bounding box.
+    ///
+    /// The bounding box is computed globally for the distributed octree.
     pub fn bounding_box(&self) -> &PhysicalBox {
         &self.bounding_box
     }
 
-    /// Return the associated coarse tree.
-    pub fn coarse_tree(&self) -> &Vec<MortonKey> {
-        &self.coarse_tree
+    /// Return the coarse tree leafs.
+    pub fn coarse_tree_leafs(&self) -> &Vec<MortonKey> {
+        &self.coarse_tree_leafs
     }
 
     /// Return the points.
@@ -146,14 +167,23 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         &self.points
     }
 
-    /// Return the leaf tree.
-    pub fn leaf_tree(&self) -> &Vec<MortonKey> {
-        &self.leaf_tree
+    /// Return the leaf nodes.
+    pub fn leaf_keys(&self) -> &Vec<MortonKey> {
+        &self.leaf_keys
     }
 
-    /// Return the map from leaf keys to point indices
-    pub fn leafs_to_point_indices(&self) -> &HashMap<MortonKey, Vec<usize>> {
-        &self.leaf_keys_to_points
+    /// Return the map from leaf keys to local point indices.
+    ///
+    /// This allows to find the points associated with a given key.
+    /// # Example
+    /// ```ignore
+    /// let leaf_map = octree.leaf_keys_to_local_point_indices();
+    /// let indices = leaf_map.get(&key);
+    /// let points_for_key = indices.iter().map(|&i| octree.points()[i]).collect::<Vec<_>>();
+    /// ```
+    /// Each point in `points_for_key` is contained in the leaf box defined by `key`.
+    pub fn leaf_keys_to_local_point_indices(&self) -> &HashMap<MortonKey, Vec<usize>> {
+        &self.leaf_keys_to_local_point_indices
     }
 
     /// Get the coarse tree bounds.
@@ -161,6 +191,16 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
     /// This returns an array of size the number of ranks,
     /// where each element consists of the smallest Morton key in
     /// the corresponding rank.
+    ///
+    /// If a Morton key is on rank i with i not the last rank then
+    /// ```text
+    /// coarse_tree_bounds[i] <= key < coarse_tree_bounds[i+1]
+    /// ```
+    /// where as if i is the last rank then
+    /// ```text
+    /// coarse_tree_bounds[i] <= key
+    /// ```
+    /// This allows to find the rank of a given Morton key.
     pub fn coarse_tree_bounds(&self) -> &Vec<MortonKey> {
         &self.coarse_tree_bounds
     }
@@ -170,8 +210,164 @@ impl<'o, C: CommunicatorCollectives> Octree<'o, C> {
         self.comm
     }
 
-    /// Return a map of all keys.
+    /// Return a map of all leaf and interior keys.
+    ///
+    /// The map assigns each key a [KeyType] identifier. It is one of:
+    /// - [KeyType::LocalLeaf] for leaf keys
+    /// - [KeyType::LocalInterior] for interior keys
+    /// - [KeyType::Global] for global keys
+    /// - [KeyType::Ghost], a typed enum for keys that are adjacent to keys
+    ///   on the current rank but live on a different rank.
+    ///
+    /// Leaf keys have no children. Interior keys have children within the local rank.
+    /// Global keys are keys that are not uniquely assigned to a rank but exist on all ranks.
+    /// The global keys are those that are close to the root of the tree. By construction these
+    /// are the ancestors of the coarse tree leafs, where as the coarse tree leafs themselves are
+    /// the first level of keys distributed across ranks. Ghost keys are keys that are not local to
+    /// the current rank but lie along the interface to the current rank. Their identifiers store the value
+    /// of the rank that they originate from.
     pub fn all_keys(&self) -> &HashMap<MortonKey, KeyType> {
         &self.all_keys
     }
+
+    /// Get the neighbour map.
+    ///
+    /// Returns a hash map that contains as keys all the keys obtained from [Octree::all_keys] except
+    /// those that are of type [KeyType::Ghost]. The values are the neighbours of the key.
+    pub fn neighbour_map(&self) -> &HashMap<MortonKey, Vec<MortonKey>> {
+        &self.neighbours
+    }
+
+    /// Return the local number of points in the octree.
+    pub fn local_number_of_points(&self) -> usize {
+        self.points.len()
+    }
+
+    /// Return the global number of points in the octree.
+    pub fn global_number_of_points(&self) -> usize {
+        let mut global_num_points = 0;
+        self.comm.all_reduce_into(
+            &self.local_number_of_points(),
+            &mut global_num_points,
+            SystemOperation::sum(),
+        );
+        global_num_points
+    }
+
+    /// Return the local maximum level
+    pub fn local_max_level(&self) -> usize {
+        self.leaf_keys
+            .iter()
+            .map(|key| key.level())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Return the global maximum level
+    pub fn global_max_level(&self) -> usize {
+        let mut global_max_level = 0;
+        self.comm.all_reduce_into(
+            &self.local_max_level(),
+            &mut global_max_level,
+            SystemOperation::max(),
+        );
+        global_max_level
+    }
+}
+
+/// Test if an array of keys are the leafs of a complete linear and balanced tree.
+pub fn is_complete_linear_and_balanced<C: CommunicatorCollectives>(
+    arr: &[MortonKey],
+    comm: &C,
+) -> bool {
+    // Send the tree to the root node and check there that it is balanced.
+
+    let mut balanced = false;
+
+    if let Some(arr) = gather_to_root(arr, comm) {
+        balanced = MortonKey::is_complete_linear_and_balanced(&arr);
+    }
+
+    comm.process_at_rank(0).broadcast_into(&mut balanced);
+
+    balanced
+}
+
+/// Compute the global bounding box across all points on all processes.
+pub fn compute_global_bounding_box<C: CommunicatorCollectives>(
+    points: &[Point],
+    comm: &C,
+) -> PhysicalBox {
+    // Make sure that the points array is a multiple of 3.
+
+    // Now compute the minimum and maximum across each dimension.
+
+    let mut xmin = f64::MAX;
+    let mut xmax = f64::MIN;
+
+    let mut ymin = f64::MAX;
+    let mut ymax = f64::MIN;
+
+    let mut zmin = f64::MAX;
+    let mut zmax = f64::MIN;
+
+    for point in points {
+        let x = point.coords()[0];
+        let y = point.coords()[1];
+        let z = point.coords()[2];
+
+        xmin = f64::min(xmin, x);
+        xmax = f64::max(xmax, x);
+
+        ymin = f64::min(ymin, y);
+        ymax = f64::max(ymax, y);
+
+        zmin = f64::min(zmin, z);
+        zmax = f64::max(zmax, z);
+    }
+
+    let mut global_xmin = 0.0;
+    let mut global_xmax = 0.0;
+
+    let mut global_ymin = 0.0;
+    let mut global_ymax = 0.0;
+
+    let mut global_zmin = 0.0;
+    let mut global_zmax = 0.0;
+
+    comm.all_reduce_into(&xmin, &mut global_xmin, SystemOperation::min());
+    comm.all_reduce_into(&xmax, &mut global_xmax, SystemOperation::max());
+
+    comm.all_reduce_into(&ymin, &mut global_ymin, SystemOperation::min());
+    comm.all_reduce_into(&ymax, &mut global_ymax, SystemOperation::max());
+
+    comm.all_reduce_into(&zmin, &mut global_zmin, SystemOperation::min());
+    comm.all_reduce_into(&zmax, &mut global_zmax, SystemOperation::max());
+
+    let xdiam = global_xmax - global_xmin;
+    let ydiam = global_ymax - global_ymin;
+    let zdiam = global_zmax - global_zmin;
+
+    let xmean = global_xmin + 0.5 * xdiam;
+    let ymean = global_ymin + 0.5 * ydiam;
+    let zmean = global_zmin + 0.5 * zdiam;
+
+    // We increase diameters by box size on deepest level
+    // and use the maximum diameter to compute a
+    // cubic bounding box.
+
+    let deepest_box_diam = 1.0 / (1 << DEEPEST_LEVEL) as f64;
+
+    let max_diam = [xdiam, ydiam, zdiam].into_iter().reduce(f64::max).unwrap();
+
+    let max_diam = max_diam * (1.0 + deepest_box_diam);
+
+    PhysicalBox::new([
+        xmean - 0.5 * max_diam,
+        ymean - 0.5 * max_diam,
+        zmean - 0.5 * max_diam,
+        xmean + 0.5 * max_diam,
+        ymean + 0.5 * max_diam,
+        zmean + 0.5 * max_diam,
+    ])
 }
