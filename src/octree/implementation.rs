@@ -980,7 +980,6 @@ pub fn compute_neighbours(
                             .filter(|key| key.is_valid())
                         {
                             if neighbour_child_neighbour.parent() == *key {
-                                println!("Added deeper neighbour");
                                 debug_assert!(all_keys.contains_key(&neighbour_child));
                                 neighbours.entry(*key).or_default().push(neighbour_child);
                             }
