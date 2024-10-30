@@ -954,7 +954,7 @@ pub fn compute_neighbours(
             continue;
         }
 
-        // For leaf keys we need to check if the neighbours exist on the same level, above or below.
+        // For leaf keys we need to check if the neighbours exist on the same level or above.
 
         if *key_type == KeyType::LocalLeaf {
             for neighbour in key
@@ -966,26 +966,15 @@ pub fn compute_neighbours(
                 if all_keys.contains_key(&neighbour) {
                     // The easy case. Just add the neighbour.
                     neighbours.entry(*key).or_default().push(neighbour);
-                } else if all_keys.contains_key(&neighbour.parent()) {
+                } else {
                     // The neighbour is on the next level closer to root.
                     // Note, we cannot mistakenly add the parent of a sibling since the tree is complete.
+                    debug_assert!(all_keys.contains_key(&neighbour.parent())); // Neighbour parent must be in `all_keys`.
                     neighbours.entry(*key).or_default().push(neighbour.parent());
-                } else {
-                    // We take children of the neighbour and take each child that is neighbour to a child
-                    // of the current key.
-                    for neighbour_child in neighbour.children() {
-                        for neighbour_child_neighbour in neighbour_child
-                            .neighbours()
-                            .iter()
-                            .filter(|key| key.is_valid())
-                        {
-                            if neighbour_child_neighbour.parent() == *key {
-                                debug_assert!(all_keys.contains_key(&neighbour_child));
-                                neighbours.entry(*key).or_default().push(neighbour_child);
-                            }
-                        }
-                    }
                 }
+                // Note that the case cannot happen that neither the neighbor nor its parent exists. In a 2:1 tree
+                // the only other case could be that the neighbours children are in the tree. But in that case the
+                // neighbour itself is also in the tree as its children are.
             }
             continue;
         }
