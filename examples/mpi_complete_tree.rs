@@ -35,7 +35,8 @@ pub fn main() {
     }
 
     let start = Instant::now();
-    let octree = Octree::new(&points, 15, 50, &comm);
+    // The following code will create a complete octree with a maximum level of 16.
+    let octree = Octree::new(&points, 16, 50, &comm);
     let duration = start.elapsed();
 
     let global_number_of_points = octree.global_number_of_points();
