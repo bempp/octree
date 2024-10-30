@@ -5,7 +5,7 @@ battleship = []
 
 [package]
 name = "bempp-octree"
-version = "0.1.1"
+version = "0.1.1-dev"
 edition = "2021"
 authors = [
     "Srinath Kailasa <srinathkailasa@gmail.com>, Timo Betcke <timo.betcke@gmail.com>",
