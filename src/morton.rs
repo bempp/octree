@@ -479,7 +479,7 @@ impl MortonKey {
 
         while child_level <= DEEPEST_LEVEL {
             let shift = LEVEL_DISPLACEMENT + 3 * (DEEPEST_LEVEL - child_level);
-            key = MortonKey::new(1 + (key.value | outer_index << shift));
+            key = MortonKey::new(1 + (key.value | (outer_index << shift)));
             child_level += 1;
         }
 

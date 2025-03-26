@@ -54,7 +54,6 @@ pub fn gather_to_all<T: Equivalence, C: CommunicatorCollectives>(arr: &[T], comm
 
     recvbuffer
 }
-/// Array to root
 
 /// Gather distributed array to the root rank.
 ///
