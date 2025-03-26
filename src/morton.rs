@@ -1018,7 +1018,7 @@ mod test {
         fn sanity_checks(key1: MortonKey, key2: MortonKey, mut keys: Vec<MortonKey>) {
             // Check that keys are strictly sorted and that no key is ancestor of the next key.
 
-            let min_level = key1.level().min(key2.level());
+            let max_level = key1.level().max(key2.level());
 
             keys.insert(0, key1);
             keys.push(key2);
@@ -1028,10 +1028,10 @@ mod test {
                 assert!(!key1.is_ancestor(key2));
             }
 
-            // Check that level not higher than min_level
+            // Check that level not higher than max_level
 
             for k in keys.iter() {
-                assert!(k.level() <= min_level);
+                assert!(k.level() <= max_level);
             }
         }
 
